@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<title>three.js webgpu - sky environment</title>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+		<meta property="og:title" content="three.js webgpu - sky environment">
+		<meta property="og:type" content="website">
+		<meta property="og:url" content="https://threejs.org/examples/webgpu_sky_environment.html">
+		<meta property="og:image" content="https://threejs.org/examples/screenshots/webgpu_sky_environment.jpg">
+		<link type="text/css" rel="stylesheet" href="example.css">
+	</head>
+	<body>
+
+		<div id="info">
+			<a href="https://threejs.org/" target="_blank" rel="noopener" class="logo-link"></a>
+
+			<div class="title-wrapper">
+				<a href="https://threejs.org/" target="_blank" rel="noopener">three.js</a><span>Sky Environment</span>
+			</div>
+
+			<small>
+				The sky is captured and prefiltered for image-based lighting every frame.
+			</small>
+		</div>
+
+		<script type="importmap">
+			{
+				"imports": {
+					"three": "../build/three.webgpu.js",
+					"three/webgpu": "../build/three.webgpu.js",
+					"three/tsl": "../build/three.tsl.js",
+					"three/addons/": "./jsm/"
+				}
+			}
+		</script>
+
+		<script type="module">
+
+			import * as THREE from 'three/webgpu';
+
+			import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+			import { Inspector } from 'three/addons/inspector/Inspector.js';
+			import { SkyMesh } from 'three/addons/objects/SkyMesh.js';
+
+			const params = {
+				elevation: 2,
+				azimuth: 120,
+				animate: true,
+				updateEnvironment: true,
+				environmentSize: 256,
+				exposure: 0.075
+			};
+
+			let camera, scene, renderer, controls;
+			let sky, sun, spheres, cubeCamera, cubeRenderTarget;
+
+			const timer = new THREE.Timer();
+
+			init();
+
+			function init() {
+
+				camera = new THREE.PerspectiveCamera( 45, window.innerWidth / window.innerHeight, 0.1, 2000 );
+				camera.position.set( 0, 2.5, 9 );
+
+				scene = new THREE.Scene();
+
+				sky = new SkyMesh();
+				sky.scale.setScalar( 1000 );
+				sky.turbidity.value = 10;
+				sky.rayleigh.value = 3;
+				sky.cloudCoverage.value = 0.2;
+
+				// The sun disc is far brighter than the rest of the sky. Leave it out of the
+				// capture, and light the scene with a directional light instead.
+
+				sky.showSunDisc.value = false;
+				scene.add( sky );
+
+				sun = new THREE.DirectionalLight( 0xffffff, 1 );
+				scene.add( sun );
+
+				// The environment is a cube capture of the sky. Because it is a render target, the
+				// renderer prefilters it again whenever it is captured.
+
+				createEnvironment();
+
+				// Spheres from smooth to rough, metallic in the back row and dielectric in the front.
+
+				spheres = new THREE.Group();
+				scene.add( spheres );
+
+				const geometry = new THREE.SphereGeometry( 0.4, 64, 32 );
+
+				for ( let i = 0; i < 9; i ++ ) {
+
+					for ( let j = 0; j < 2; j ++ ) {
+
+						const material = new THREE.MeshStandardNodeMaterial( {
+							color: j === 0 ? 0xffffff : 0xb02020,
+							metalness: j === 0 ? 1 : 0,
+							roughness: i / 8
+						} );
+
+						const mesh = new THREE.Mesh( geometry, material );
+						mesh.position.set( ( i - 4 ) * 1.0, 1.5 - j * 1.1, - j * 0.2 );
+						spheres.add( mesh );
+
+					}
+
+				}
+
+				const ground = new THREE.Mesh( new THREE.CircleGeometry( 30, 64 ), new THREE.MeshStandardNodeMaterial( { color: 0x303030, roughness: 0.8 } ) );
+				ground.rotation.x = - Math.PI / 2;
+				ground.position.y = - 0.2;
+				spheres.add( ground );
+
+				renderer = new THREE.WebGPURenderer( { antialias: true } );
+				renderer.setPixelRatio( window.devicePixelRatio );
+				renderer.setSize( window.innerWidth, window.innerHeight );
+				renderer.setAnimationLoop( animate );
+				renderer.toneMapping = THREE.ACESFilmicToneMapping;
+				renderer.inspector = new Inspector();
+				document.body.appendChild( renderer.domElement );
+
+				controls = new OrbitControls( camera, renderer.domElement );
+				controls.target.set( 0, 1, 0 );
+				controls.maxPolarAngle = Math.PI / 2;
+				controls.update();
+
+				const gui = renderer.inspector.createParameters( 'Settings' );
+				gui.add( params, 'elevation', 0, 90, 0.1 ).listen();
+				gui.add( params, 'azimuth', - 180, 180, 0.1 );
+				gui.add( params, 'animate' ).name( 'animate sun' );
+				gui.add( params, 'updateEnvironment' ).name( 'update environment' );
+				gui.add( params, 'environmentSize', [ 64, 128, 256, 512 ] ).name( 'environment size' ).onChange( createEnvironment );
+				gui.add( params, 'exposure', 0, 0.3 );
+
+				window.addEventListener( 'resize', onWindowResize );
+
+			}
+
+			function createEnvironment() {
+
+				if ( cubeRenderTarget !== undefined ) cubeRenderTarget.dispose();
+
+				cubeRenderTarget = new THREE.CubeRenderTarget( Number( params.environmentSize ), { type: THREE.HalfFloatType, generateMipmaps: true, minFilter: THREE.LinearMipmapLinearFilter } );
+				cubeCamera = new THREE.CubeCamera( 1, 2000, cubeRenderTarget );
+
+				scene.environment = cubeRenderTarget.texture;
+
+			}
+
+			function onWindowResize() {
+
+				camera.aspect = window.innerWidth / window.innerHeight;
+				camera.updateProjectionMatrix();
+
+				renderer.setSize( window.innerWidth, window.innerHeight );
+
+			}
+
+			function animate() {
+
+				timer.update();
+
+				if ( params.animate ) {
+
+					// From sunset to high noon and back, about once every 20 seconds.
+
+					params.elevation = 32 - 30 * Math.cos( timer.getElapsed() * 0.3 );
+
+				}
+
+				const phi = THREE.MathUtils.degToRad( 90 - params.elevation );
+				const theta = THREE.MathUtils.degToRad( params.azimuth );
+
+				sky.sunPosition.value.setFromSphericalCoords( 1, phi, theta );
+				sun.position.copy( sky.sunPosition.value );
+				sun.intensity = THREE.MathUtils.smoothstep( params.elevation, 0, 6 ) * 2;
+
+				// A rough auto exposure, so that the scene stays readable from sunset to noon.
+
+				renderer.toneMappingExposure = params.exposure / Math.max( Math.cos( phi ) + 0.1, 0.15 );
+
+				if ( params.updateEnvironment ) {
+
+					spheres.visible = false;
+					cubeCamera.update( renderer, scene );
+					spheres.visible = true;
+
+				}
+
+				renderer.render( scene, camera );
+
+			}
+
+		</script>
+	</body>
+</html>
