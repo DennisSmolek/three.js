@@ -32,7 +32,7 @@
 			import { reflectionProbes } from 'three/addons/tsl/lighting/ReflectionProbesNode.js';
 			import { ReflectionProbesHelper } from 'three/addons/helpers/ReflectionProbesHelper.js';
 
-			const params = { showProbes: false, dynamicObject: 'Bunny', pause: false, showGrid: false, gridResolution: 6, gridSize: 0.12, resolution: 128, boxProjection: true, capture: capture };
+			const params = { showProbes: false, dynamicObject: 'Bunny', pause: false, showGrid: false, gridResolution: 6, gridSize: 0.12, resolution: 128, boxProjection: true, liveCapture: false, capture: capture };
 			const grid = new THREE.Group();
 			const timer = new THREE.Timer();
 			let camera, scene, renderer, controls, probes, probesHelper, gridMaterial, dynamicObject;
@@ -329,6 +329,7 @@
 				const gui = renderer.inspector.createParameters( 'Reflection Probes' );
 				gui.add( params, 'resolution', [ 64, 128, 256, 512, 1024 ] ).name( 'Capture Resolution' );
 				gui.add( params, 'capture' ).name( 'Capture' );
+				gui.add( params, 'liveCapture' ).name( 'Live Capture' );
 				gui.add( params, 'boxProjection' ).name( 'Box Projection' ).onChange( ( value ) => probes.boxProjection = value );
 
 				const dynamicTest = gui.addFolder( 'Dynamic Test' );
@@ -371,6 +372,8 @@
 					updateDynamicObject( animationTime );
 
 				}
+
+				if ( params.liveCapture ) capture( true );
 
 				renderer.render( scene, camera );
 
@@ -426,11 +429,13 @@
 
 			}
 
-			function capture() {
+			function capture( live = false ) {
 
-				// Keep helpers and test objects out of the reflections.
+				// Keep helpers and test objects out of the reflections. A live capture
+				// keeps the dynamic object, so that it shows up in the reflections.
 
-				probesHelper.visible = grid.visible = dynamicObject.visible = false;
+				probesHelper.visible = grid.visible = false;
+				dynamicObject.visible = live === true && params.dynamicObject !== 'None';
 				probes.bake( renderer, scene, { resolution: Number( params.resolution ), near: 0.05, far: 30 } );
 				probesHelper.visible = params.showProbes;
 				grid.visible = params.showGrid;

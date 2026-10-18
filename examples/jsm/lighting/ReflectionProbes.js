@@ -163,6 +163,9 @@ class ReflectionProbes extends Object3D {
 		this.capturing = false;
 
 		this._renderTarget = null;
+		this._pmrem = null;
+		this._generator = null;
+		this._environment = new Scene();
 
 	}
 
@@ -189,31 +192,50 @@ class ReflectionProbes extends Object3D {
 		const probes = this.children.filter( ( child ) => child.isReflectionProbe ).sort( ( a, b ) => volume( a ) - volume( b ) );
 		const maxLod = Math.log2( resolution ) - 3;
 
-		const renderTarget = new RenderTarget( resolution, resolution, {
-			depth: ( probes.length + 1 ) * 6,
-			type: HalfFloatType,
-			depthBuffer: false,
-			generateMipmaps: false,
-			minFilter: LinearMipmapLinearFilter,
-			mapping: CubeReflectionMapping
-		} );
+		const depth = ( probes.length + 1 ) * 6;
 
-		renderTarget.texture = new CubeArrayTexture().copy( renderTarget.texture );
-		renderTarget.texture.name = 'ReflectionProbes';
+		// Reuse the cube array and the PMREM between bakes of the same layout, so that
+		// re-baking every frame neither allocates nor changes the texture materials sample.
 
-		for ( let lod = 0; lod <= maxLod; lod ++ ) {
+		let renderTarget = this._renderTarget;
+		let previousRenderTarget = null;
 
-			renderTarget.texture.mipmaps.push( { width: resolution >> lod, height: resolution >> lod } );
+		if ( renderTarget === null || renderTarget.width !== resolution || renderTarget.depth !== depth ) {
+
+			// Materials sample the previous cube array while the probes are captured.
+
+			previousRenderTarget = renderTarget;
+
+			if ( this._pmrem !== null ) this._pmrem.dispose();
+			this._pmrem = null;
+
+			renderTarget = new RenderTarget( resolution, resolution, {
+				depth,
+				type: HalfFloatType,
+				depthBuffer: false,
+				generateMipmaps: false,
+				minFilter: LinearMipmapLinearFilter,
+				mapping: CubeReflectionMapping
+			} );
+
+			renderTarget.texture = new CubeArrayTexture().copy( renderTarget.texture );
+			renderTarget.texture.name = 'ReflectionProbes';
+
+			for ( let lod = 0; lod <= maxLod; lod ++ ) {
+
+				renderTarget.texture.mipmaps.push( { width: resolution >> lod, height: resolution >> lod } );
+
+			}
+
+			renderer.initRenderTarget( renderTarget );
+
+			if ( this._generator === null ) this._generator = new PMREMGenerator( renderer );
 
 		}
 
-		renderer.initRenderTarget( renderTarget );
-
-		const generator = new PMREMGenerator( renderer );
-		const environment = new Scene();
+		const generator = this._generator;
+		const environment = this._environment;
 		environment.background = scene.environment;
-
-		let pmrem = null;
 
 		this.capturing = true;
 
@@ -228,7 +250,7 @@ class ReflectionProbes extends Object3D {
 				const probe = probes[ i ];
 				const position = probe !== undefined ? probe.getWorldPosition( _position ) : _position.set( 0, 0, 0 );
 
-				pmrem = generator.fromScene( probe !== undefined ? scene : environment, 0, near, far, { size: resolution, position, renderTarget: pmrem } );
+				this._pmrem = generator.fromScene( probe !== undefined ? scene : environment, 0, near, far, { size: resolution, position, renderTarget: this._pmrem } );
 
 				for ( let lod = 0; lod <= maxLod; lod ++ ) {
 
@@ -238,7 +260,7 @@ class ReflectionProbes extends Object3D {
 					_region.max.set( size, size, 6 );
 					_destination.set( 0, 0, i * 6 );
 
-					renderer.copyTextureToTexture( pmrem.texture, renderTarget.texture, _region, _destination, lod, lod );
+					renderer.copyTextureToTexture( this._pmrem.texture, renderTarget.texture, _region, _destination, lod, lod );
 
 				}
 
@@ -248,12 +270,9 @@ class ReflectionProbes extends Object3D {
 
 			this.capturing = false;
 
-			if ( pmrem !== null ) pmrem.dispose();
-			generator.dispose();
-
 		}
 
-		if ( this._renderTarget !== null ) this._renderTarget.dispose();
+		if ( previousRenderTarget !== null ) previousRenderTarget.dispose();
 
 		this._renderTarget = renderTarget;
 		this.texture = renderTarget.texture;
@@ -267,8 +286,12 @@ class ReflectionProbes extends Object3D {
 	dispose() {
 
 		if ( this._renderTarget !== null ) this._renderTarget.dispose();
+		if ( this._pmrem !== null ) this._pmrem.dispose();
+		if ( this._generator !== null ) this._generator.dispose();
 
 		this._renderTarget = null;
+		this._pmrem = null;
+		this._generator = null;
 		this.texture = null;
 
 	}
