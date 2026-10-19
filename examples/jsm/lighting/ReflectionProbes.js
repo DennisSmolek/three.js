@@ -185,6 +185,8 @@ class ReflectionProbes extends Object3D {
 	 * @param {number} [options.resolution=128] - Cube face size, a power of two from 64.
 	 * @param {number} [options.near=0.1] - Near plane of the capture camera.
 	 * @param {number} [options.far=100] - Far plane of the capture camera.
+	 * @param {Array<ReflectionProbe>} [options.probes] - Captures only these probes, for example to
+	 * spread a live update over several frames. A bake that changes the layout captures every probe.
 	 */
 	bake( renderer, scene, options = {} ) {
 
@@ -241,6 +243,11 @@ class ReflectionProbes extends Object3D {
 
 		}
 
+		// Capturing only some probes keeps the other slots, so it needs the slots of the last bake.
+
+		const sameProbes = probes.length === this.bakedProbes.length && probes.every( ( probe, i ) => probe === this.bakedProbes[ i ] );
+		const captured = options.probes !== undefined && layoutChanged === false && sameProbes ? options.probes : probes;
+
 		// The environment is captured again only when it changed. A new cube array starts black,
 		// which is what no environment looks like.
 
@@ -281,9 +288,11 @@ class ReflectionProbes extends Object3D {
 
 			if ( captureEnvironment ) captureSlot( environment, _position.set( 0, 0, 0 ), probes.length );
 
-			for ( let slot = 0; slot < probes.length; slot ++ ) {
+			for ( const probe of captured ) {
 
-				captureSlot( scene, probes[ slot ].getWorldPosition( _position ), slot );
+				const slot = probes.indexOf( probe );
+
+				if ( slot !== - 1 ) captureSlot( scene, probe.getWorldPosition( _position ), slot );
 
 			}
 

@@ -32,11 +32,11 @@
 			import { reflectionProbes } from 'three/addons/tsl/lighting/ReflectionProbesNode.js';
 			import { ReflectionProbesHelper } from 'three/addons/helpers/ReflectionProbesHelper.js';
 
-			const params = { showProbes: false, dynamicObject: 'Bunny', pause: false, showGrid: false, gridResolution: 6, gridSize: 0.12, resolution: 128, boxProjection: true, liveCapture: true, animateRoom: true, includeInCapture: false, capture: capture };
+			const params = { showProbes: false, dynamicObject: 'Bunny', pause: false, showGrid: false, gridResolution: 6, gridSize: 0.12, resolution: 128, boxProjection: true, liveCapture: true, timeSlicing: true, animateRoom: true, includeInCapture: false, capture: capture };
 			const grid = new THREE.Group();
 			const timer = new THREE.Timer();
 			let camera, scene, renderer, controls, probes, probesHelper, gridMaterial, dynamicObject, warmLight, coolLight, torusKnot;
-			let animationTime = 0, roomTime = 0;
+			let animationTime = 0, roomTime = 0, nextProbe = 0;
 
 			init();
 
@@ -330,6 +330,7 @@
 				gui.add( params, 'resolution', [ 64, 128, 256, 512, 1024 ] ).name( 'Capture Resolution' );
 				gui.add( params, 'capture' ).name( 'Capture' );
 				gui.add( params, 'liveCapture' ).name( 'Live Capture' );
+				gui.add( params, 'timeSlicing' ).name( 'Time Slicing' );
 				gui.add( params, 'animateRoom' ).name( 'Animate Room' );
 				gui.add( params, 'boxProjection' ).name( 'Box Projection' ).onChange( ( value ) => probes.boxProjection = value );
 
@@ -462,7 +463,17 @@
 				probesHelper.visible = grid.visible = false;
 				dynamicObject.visible = live === true && params.includeInCapture && params.dynamicObject !== 'None';
 
-				probes.bake( renderer, scene, { resolution: Number( params.resolution ), near: 0.05, far: 30 } );
+				const options = { resolution: Number( params.resolution ), near: 0.05, far: 30 };
+
+				if ( live === true && params.timeSlicing && probes.bakedProbes.length > 0 ) {
+
+					// Re-capture one probe per frame, in turn, so each is at most a few frames old.
+
+					options.probes = [ probes.bakedProbes[ nextProbe ++ % probes.bakedProbes.length ] ];
+
+				}
+
+				probes.bake( renderer, scene, options );
 
 				probesHelper.visible = params.showProbes;
 				grid.visible = params.showGrid;
