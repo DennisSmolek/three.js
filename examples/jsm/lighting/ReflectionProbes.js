@@ -1,5 +1,6 @@
 import {
 	Box3,
+	Color,
 	CubeArrayTexture,
 	CubeReflectionMapping,
 	HalfFloatType,
@@ -15,6 +16,7 @@ const _position = /*@__PURE__*/ new Vector3();
 const _size = /*@__PURE__*/ new Vector3();
 const _region = /*@__PURE__*/ new Box3();
 const _destination = /*@__PURE__*/ new Vector3();
+const _black = /*@__PURE__*/ new Color( 0x000000 );
 
 /**
  * A local reflection volume. Add it to a {@link ReflectionProbes} container.
@@ -167,6 +169,10 @@ class ReflectionProbes extends Object3D {
 		this._generator = null;
 		this._environment = new Scene();
 
+		this._environmentTexture = undefined;
+		this._environmentVersion = - 1;
+		this._environmentPMREMVersion = - 1;
+
 	}
 
 	/**
@@ -200,7 +206,9 @@ class ReflectionProbes extends Object3D {
 		let renderTarget = this._renderTarget;
 		let previousRenderTarget = null;
 
-		if ( renderTarget === null || renderTarget.width !== resolution || renderTarget.depth !== depth ) {
+		const layoutChanged = renderTarget === null || renderTarget.width !== resolution || renderTarget.depth !== depth;
+
+		if ( layoutChanged ) {
 
 			// Materials sample the previous cube array while the probes are captured.
 
@@ -233,36 +241,49 @@ class ReflectionProbes extends Object3D {
 
 		}
 
+		// The environment is captured again only when it changed. A new cube array starts black,
+		// which is what no environment looks like.
+
+		const environmentTexture = scene.environment;
+
+		const environmentChanged = environmentTexture !== this._environmentTexture ||
+			( environmentTexture !== null && ( environmentTexture.version !== this._environmentVersion || environmentTexture.pmremVersion !== this._environmentPMREMVersion ) );
+
+		const captureEnvironment = layoutChanged ? environmentTexture !== null : environmentChanged;
+
 		const generator = this._generator;
 		const environment = this._environment;
-		environment.background = scene.environment;
+		environment.background = environmentTexture !== null ? environmentTexture : _black;
+
+		const captureSlot = ( source, position, slot ) => {
+
+			this._pmrem = generator.fromScene( source, 0, near, far, { size: resolution, position, renderTarget: this._pmrem } );
+
+			for ( let lod = 0; lod <= maxLod; lod ++ ) {
+
+				const size = resolution >> lod;
+
+				_region.min.set( 0, 0, 0 );
+				_region.max.set( size, size, 6 );
+				_destination.set( 0, 0, slot * 6 );
+
+				renderer.copyTextureToTexture( this._pmrem.texture, renderTarget.texture, _region, _destination, lod, lod );
+
+			}
+
+		};
 
 		this.capturing = true;
 
 		try {
 
-			// Unfilled cubes stay black, so an empty environment needs no capture.
+			// The environment goes first, as the probe captures reflect it.
 
-			const count = scene.environment !== null ? probes.length + 1 : probes.length;
+			if ( captureEnvironment ) captureSlot( environment, _position.set( 0, 0, 0 ), probes.length );
 
-			for ( let i = 0; i < count; i ++ ) {
+			for ( let slot = 0; slot < probes.length; slot ++ ) {
 
-				const probe = probes[ i ];
-				const position = probe !== undefined ? probe.getWorldPosition( _position ) : _position.set( 0, 0, 0 );
-
-				this._pmrem = generator.fromScene( probe !== undefined ? scene : environment, 0, near, far, { size: resolution, position, renderTarget: this._pmrem } );
-
-				for ( let lod = 0; lod <= maxLod; lod ++ ) {
-
-					const size = resolution >> lod;
-
-					_region.min.set( 0, 0, 0 );
-					_region.max.set( size, size, 6 );
-					_destination.set( 0, 0, i * 6 );
-
-					renderer.copyTextureToTexture( this._pmrem.texture, renderTarget.texture, _region, _destination, lod, lod );
-
-				}
+				captureSlot( scene, probes[ slot ].getWorldPosition( _position ), slot );
 
 			}
 
@@ -271,6 +292,10 @@ class ReflectionProbes extends Object3D {
 			this.capturing = false;
 
 		}
+
+		this._environmentTexture = environmentTexture;
+		this._environmentVersion = environmentTexture !== null ? environmentTexture.version : - 1;
+		this._environmentPMREMVersion = environmentTexture !== null ? environmentTexture.pmremVersion : - 1;
 
 		if ( previousRenderTarget !== null ) previousRenderTarget.dispose();
 
