@@ -32,11 +32,11 @@
 			import { reflectionProbes } from 'three/addons/tsl/lighting/ReflectionProbesNode.js';
 			import { ReflectionProbesHelper } from 'three/addons/helpers/ReflectionProbesHelper.js';
 
-			const params = { showProbes: false, dynamicObject: 'Bunny', pause: false, showGrid: false, gridResolution: 6, gridSize: 0.12, resolution: 128, boxProjection: true, liveCapture: false, capture: capture };
+			const params = { showProbes: false, dynamicObject: 'Bunny', pause: false, showGrid: false, gridResolution: 6, gridSize: 0.12, resolution: 128, boxProjection: true, liveCapture: true, animateRoom: true, includeInCapture: false, capture: capture };
 			const grid = new THREE.Group();
 			const timer = new THREE.Timer();
-			let camera, scene, renderer, controls, probes, probesHelper, gridMaterial, dynamicObject;
-			let animationTime = 0;
+			let camera, scene, renderer, controls, probes, probesHelper, gridMaterial, dynamicObject, warmLight, coolLight, torusKnot;
+			let animationTime = 0, roomTime = 0;
 
 			init();
 
@@ -214,7 +214,7 @@
 				pedestal.receiveShadow = true;
 				scene.add( pedestal );
 
-				const torusKnot = new THREE.Mesh(
+				torusKnot = new THREE.Mesh(
 					new THREE.TorusKnotGeometry( 0.3, 0.1, 64, 16 ),
 					new THREE.MeshStandardMaterial( { color: 0xff44aa, metalness: 0.2, roughness: 0.5 } )
 				);
@@ -236,7 +236,7 @@
 				// Lights
 
 				// Warm point light in left room
-				const warmLight = new THREE.PointLight( 0xffaa44, 30 );
+				warmLight = new THREE.PointLight( 0xffaa44, 30 );
 				warmLight.position.set( - 4, 4.5, 0 );
 				warmLight.castShadow = true;
 				warmLight.shadow.mapSize.setScalar( 256 );
@@ -245,7 +245,7 @@
 				scene.add( warmLight );
 
 				// Cool point light in right room
-				const coolLight = new THREE.PointLight( 0x88bbff, 30 );
+				coolLight = new THREE.PointLight( 0x88bbff, 30 );
 				coolLight.position.set( 4, 4.5, 0 );
 				coolLight.castShadow = true;
 				coolLight.shadow.mapSize.setScalar( 256 );
@@ -330,6 +330,7 @@
 				gui.add( params, 'resolution', [ 64, 128, 256, 512, 1024 ] ).name( 'Capture Resolution' );
 				gui.add( params, 'capture' ).name( 'Capture' );
 				gui.add( params, 'liveCapture' ).name( 'Live Capture' );
+				gui.add( params, 'animateRoom' ).name( 'Animate Room' );
 				gui.add( params, 'boxProjection' ).name( 'Box Projection' ).onChange( ( value ) => probes.boxProjection = value );
 
 				const dynamicTest = gui.addFolder( 'Dynamic Test' );
@@ -340,6 +341,7 @@
 
 				} );
 				dynamicTest.add( params, 'pause' ).name( 'Pause' );
+				dynamicTest.add( params, 'includeInCapture' ).name( 'Include in Capture' );
 				dynamicTest.add( dynamicMaterial, 'roughness', 0, 1, 0.01 ).name( 'Roughness' );
 
 				const staticTest = gui.addFolder( 'Static Test' );
@@ -366,16 +368,36 @@
 
 				timer.update();
 
+				const delta = timer.getDelta();
+
 				if ( ! params.pause && params.dynamicObject !== 'None' ) {
 
-					animationTime += timer.getDelta();
+					animationTime += delta;
 					updateDynamicObject( animationTime );
+
+				}
+
+				if ( params.animateRoom ) {
+
+					roomTime += delta;
+					updateRoom( roomTime );
 
 				}
 
 				if ( params.liveCapture ) capture( true );
 
 				renderer.render( scene, camera );
+
+			}
+
+			function updateRoom( time ) {
+
+				// The lights drift slowly through the hues, half a cycle apart, and the knot turns.
+				// With Live Capture off, the reflections keep showing the room as it was captured.
+
+				warmLight.color.setHSL( ( 0.08 + time * 0.02 ) % 1, 1, 0.63 );
+				coolLight.color.setHSL( ( 0.6 + time * 0.02 ) % 1, 1, 0.77 );
+				torusKnot.rotation.y = time * 0.5;
 
 			}
 
@@ -431,22 +453,17 @@
 
 			function capture( live = false ) {
 
-				// Keep helpers and test objects out of the reflections. A live capture
-				// keeps the dynamic object, so that it shows up in the reflections.
+				// Keep helpers and test objects out of the reflections. Moving objects are usually
+				// left out of probes, as the probes only see them from a few fixed points. A mirror
+				// shows the lights' highlights as a few very bright texels, which appear and disappear
+				// as it moves and make the prefiltered reflections flicker. Turn on "Include in Capture"
+				// to see this.
 
 				probesHelper.visible = grid.visible = false;
-				dynamicObject.visible = live === true && params.dynamicObject !== 'None';
-
-				// A mirror shows the lights' highlights as a few very bright texels in the capture,
-				// which appear and disappear as it moves and make the prefiltered reflections flicker.
-				// A slightly rough finish in the capture keeps them stable.
-
-				const roughness = dynamicObject.material.roughness;
-				dynamicObject.material.roughness = Math.max( roughness, 0.1 );
+				dynamicObject.visible = live === true && params.includeInCapture && params.dynamicObject !== 'None';
 
 				probes.bake( renderer, scene, { resolution: Number( params.resolution ), near: 0.05, far: 30 } );
 
-				dynamicObject.material.roughness = roughness;
 				probesHelper.visible = params.showProbes;
 				grid.visible = params.showGrid;
 				dynamicObject.visible = params.dynamicObject !== 'None';
