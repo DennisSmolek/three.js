@@ -436,7 +436,17 @@
 
 				probesHelper.visible = grid.visible = false;
 				dynamicObject.visible = live === true && params.dynamicObject !== 'None';
+
+				// A mirror shows the lights' highlights as a few very bright texels in the capture,
+				// which appear and disappear as it moves and make the prefiltered reflections flicker.
+				// A slightly rough finish in the capture keeps them stable.
+
+				const roughness = dynamicObject.material.roughness;
+				dynamicObject.material.roughness = Math.max( roughness, 0.1 );
+
 				probes.bake( renderer, scene, { resolution: Number( params.resolution ), near: 0.05, far: 30 } );
+
+				dynamicObject.material.roughness = roughness;
 				probesHelper.visible = params.showProbes;
 				grid.visible = params.showGrid;
 				dynamicObject.visible = params.dynamicObject !== 'None';
