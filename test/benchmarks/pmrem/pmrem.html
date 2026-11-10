@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<title>three.js webgpu - pmrem benchmark</title>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, initial-scale=1.0">
+		<link rel="icon" href="data:,">
+		<style>
+			body { margin: 0; background: #111; color: #fff; font: 14px monospace; }
+			#info { position: absolute; padding: 16px; background: #111e; }
+			canvas { display: block; }
+		</style>
+	</head>
+	<body>
+		<div id="info">
+			<strong>PMREMGenerator benchmark</strong><br>
+			Burst wall-clock: N bakes, one onSubmittedWorkDone(), divided by N. Minimum of several bursts.<br>
+			?src= selects the three.js sources, ?case= one of bake, cold, scene, equirect, sampling, readback.<br>
+			?captures= lists raw rgba16f cubes (six faces of size² texels) to read back instead of the sky.
+			<pre id="results">Running...</pre>
+		</div>
+		<script>
+
+			const params = new URLSearchParams( location.search );
+			const src = params.get( 'src' ) || '../../../src';
+
+			const importMap = document.createElement( 'script' );
+			importMap.type = 'importmap';
+			importMap.textContent = JSON.stringify( {
+				imports: {
+					'three': `${ src }/Three.WebGPU.js`,
+					'three/webgpu': `${ src }/Three.WebGPU.js`,
+					'three/tsl': `${ src }/Three.TSL.js`,
+					'three/addons/': '../../../examples/jsm/'
+				}
+			} );
+			document.currentScript.after( importMap );
+
+		</script>
+		<script type="module">
+
+			import * as THREE from 'three/webgpu';
+			import { SkyMesh } from 'three/addons/objects/SkyMesh.js';
+			import { HDRLoader } from 'three/addons/loaders/HDRLoader.js';
+
+			const params = new URLSearchParams( location.search );
+			const testCase = params.get( 'case' ) || 'bake';
+			const sizes = ( params.get( 'sizes' ) || '64,128,256,512,1024' ).split( ',' ).map( Number );
+
+			const BURSTS = 7;
+			const BAKES = 20;
+
+			const renderer = new THREE.WebGPURenderer( { antialias: false } );
+			renderer.setPixelRatio( 1 );
+			renderer.setSize( 64, 64 );
+			document.body.appendChild( renderer.domElement );
+			await renderer.init();
+
+			const device = renderer.backend.device;
+			const sync = () => device.queue.onSubmittedWorkDone();
+
+			// A physical sky, the kind of environment that is re-filtered whenever the sun moves.
+
+			const skyScene = new THREE.Scene();
+			const sky = new SkyMesh();
+			sky.scale.setScalar( 1000 );
+			sky.sunPosition.value.setFromSphericalCoords( 1, THREE.MathUtils.degToRad( 80 ), 0.5 );
+			sky.cloudSpeed.value = 0; // the same sky on every page, for comparing builds
+			skyScene.add( sky );
+
+			async function loadCapture( url ) {
+
+				const data = new Uint16Array( await ( await fetch( url ) ).arrayBuffer() );
+				const size = Math.sqrt( data.length / 24 );
+
+				const cubeRenderTarget = new THREE.CubeRenderTarget( size, { type: THREE.HalfFloatType } );
+				renderer.initRenderTarget( cubeRenderTarget );
+
+				const gpuTexture = renderer.backend.get( cubeRenderTarget.texture ).texture;
+				device.queue.writeTexture( { texture: gpuTexture }, data, { bytesPerRow: size * 8, rowsPerImage: size }, [ size, size, 6 ] );
+
+				return cubeRenderTarget;
+
+			}
+
+			function renderSkyCube( size ) {
+
+				const cubeRenderTarget = new THREE.CubeRenderTarget( size, { type: THREE.HalfFloatType, generateMipmaps: true, minFilter: THREE.LinearMipmapLinearFilter } );
+				const cubeCamera = new THREE.CubeCamera( 1, 2000, cubeRenderTarget );
+				cubeCamera.update( renderer, skyScene );
+
+				return cubeRenderTarget;
+
+			}
+
+			// Runs work() in bursts and returns the minimum and median wall-clock and CPU time per call.
+			async function time( work, bakes = BAKES ) {
+
+				for ( let i = 0; i < 3; i ++ ) work();
+				await sync();
+
+				const walls = [];
+				let cpu = Infinity;
+
+				for ( let burst = 0; burst < BURSTS; burst ++ ) {
+
+					const t0 = performance.now();
+					for ( let i = 0; i < bakes; i ++ ) work();
+					cpu = Math.min( cpu, ( performance.now() - t0 ) / bakes );
+					await sync();
+					walls.push( ( performance.now() - t0 ) / bakes );
+
+				}
+
+				walls.sort( ( a, b ) => a - b );
+
+				return { ms: walls[ 0 ], medianMs: walls[ BURSTS >> 1 ], cpuMs: cpu };
+
+			}
+
+			function describe( target ) {
+
+				return `${ target.width }² × ${ target.texture.mipmaps.length } mips`;
+
+			}
+
+			const cases = {
+
+				// fromCubemap() into a persistent target, as PMREMNode does for a dynamic environment.
+				async bake() {
+
+					const rows = [];
+
+					for ( const size of sizes ) {
+
+						const source = renderSkyCube( size );
+						const generator = new THREE.PMREMGenerator( renderer );
+						const target = generator.fromCubemap( source.texture );
+
+						const result = await time( () => generator.fromCubemap( source.texture, target ) );
+						rows.push( { input: size, output: describe( target ), ...result } );
+
+						generator.dispose();
+						target.dispose();
+						source.dispose();
+
+					}
+
+					return rows;
+
+				},
+
+				// The first bake of a page, including shader compilation.
+				async cold() {
+
+					const size = sizes[ 0 ];
+					const source = renderSkyCube( size );
+					await sync();
+
+					const t0 = performance.now();
+					const generator = new THREE.PMREMGenerator( renderer );
+					const target = generator.fromCubemap( source.texture );
+					const cpuMs = performance.now() - t0;
+					await sync();
+
+					return [ { input: size, output: describe( target ), ms: performance.now() - t0, cpuMs } ];
+
+				},
+
+				// fromScene() at reflection probe sizes: a cube camera capture plus the prefilter.
+				async scene() {
+
+					const scene = new THREE.Scene();
+					scene.background = new THREE.Color( 0x334455 );
+					scene.add( new THREE.HemisphereLight( 0xffffff, 0x444444, 2 ) );
+
+					const geometry = new THREE.BoxGeometry();
+
+					for ( let i = 0; i < 64; i ++ ) {
+
+						const mesh = new THREE.Mesh( geometry, new THREE.MeshStandardNodeMaterial( { color: new THREE.Color().setHSL( i / 64, 0.7, 0.5 ) } ) );
+						mesh.position.set( ( i % 8 ) - 3.5, 0, Math.floor( i / 8 ) - 3.5 ).multiplyScalar( 3 );
+						scene.add( mesh );
+
+					}
+
+					const rows = [];
+
+					for ( const size of sizes ) {
+
+						const generator = new THREE.PMREMGenerator( renderer );
+						let target = generator.fromScene( scene, 0, 0.1, 100, { size } );
+
+						const result = await time( () => {
+
+							target = generator.fromScene( scene, 0, 0.1, 100, { size, renderTarget: target } );
+
+						} );
+
+						rows.push( { input: size, output: describe( target ), ...result } );
+
+						generator.dispose();
+						target.dispose();
+
+					}
+
+					return rows;
+
+				},
+
+				// A one-shot equirectangular HDRI, the common static environment.
+				async equirect() {
+
+					const hdr = await new HDRLoader().setPath( '../../../examples/textures/equirectangular/' ).loadAsync( 'venice_sunset_1k.hdr' );
+					hdr.mapping = THREE.EquirectangularReflectionMapping;
+
+					const generator = new THREE.PMREMGenerator( renderer );
+					const target = generator.fromEquirectangular( hdr );
+
+					const result = await time( () => generator.fromEquirectangular( hdr, target ), 10 );
+
+					generator.dispose();
+					target.dispose();
+
+					return [ { input: '1k equirect', output: describe( target ), ...result } ];
+
+				},
+
+				// The cost of materials sampling a PMREM, which depends on how its texture was allocated.
+				async sampling() {
+
+					const width = 1920, height = 1080;
+					const renderTarget = new THREE.RenderTarget( width, height, { type: THREE.HalfFloatType, depthBuffer: true } );
+
+					const scene = new THREE.Scene();
+					const camera = new THREE.PerspectiveCamera( 50, width / height, 0.1, 100 );
+					camera.position.set( 0, 0, 14 );
+
+					const geometry = new THREE.SphereGeometry( 0.45, 64, 32 );
+
+					for ( let i = 0; i < 400; i ++ ) {
+
+						const material = new THREE.MeshStandardNodeMaterial( { metalness: 1, roughness: ( i % 20 ) / 19 } );
+						const mesh = new THREE.Mesh( geometry, material );
+						mesh.position.set( ( i % 20 ) - 9.5, Math.floor( i / 20 ) - 9.5, 0 ).multiplyScalar( 0.6 );
+						scene.add( mesh );
+
+					}
+
+					const rows = [];
+
+					for ( const size of sizes ) {
+
+						const source = renderSkyCube( size );
+						const generator = new THREE.PMREMGenerator( renderer );
+						const pmrem = generator.fromCubemap( source.texture );
+
+						scene.environment = pmrem.texture;
+						renderer.setRenderTarget( renderTarget );
+
+						const result = await time( () => renderer.render( scene, camera ), 30 );
+						rows.push( { input: size, output: describe( pmrem ), ...result } );
+
+						renderer.setRenderTarget( null );
+						generator.dispose();
+						pmrem.dispose();
+						source.dispose();
+
+					}
+
+					return rows;
+
+				},
+
+				// Every mip level of the PMREM as half floats, for comparing builds texel by texel.
+				async readback() {
+
+					const rows = [];
+					const captures = params.get( 'captures' ) ? params.get( 'captures' ).split( ',' ) : [];
+					const inputs = captures.length > 0 ? captures : sizes;
+
+					for ( const input of inputs ) {
+
+						const source = typeof input === 'string' ? await loadCapture( input ) : renderSkyCube( input );
+						const generator = new THREE.PMREMGenerator( renderer );
+						const target = generator.fromCubemap( source.texture );
+						await sync();
+
+						const levels = [];
+
+						for ( let lod = 0; lod < target.texture.mipmaps.length; lod ++ ) {
+
+							levels.push( await readLevel( target.texture, target.width >> lod, lod ) );
+
+						}
+
+						rows.push( { input: typeof input === 'string' ? input.split( '/' ).pop() : input, output: describe( target ), levels } );
+
+						generator.dispose();
+						target.dispose();
+						source.dispose();
+
+					}
+
+					return rows;
+
+				}
+
+			};
+
+			async function readLevel( texture, size, lod ) {
+
+				const gpuTexture = renderer.backend.get( texture ).texture;
+				const rowBytes = size * 8;
+				const bytesPerRow = Math.ceil( rowBytes / 256 ) * 256;
+				const buffer = device.createBuffer( { size: bytesPerRow * size * 6, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ } );
+
+				const encoder = device.createCommandEncoder();
+				encoder.copyTextureToBuffer( { texture: gpuTexture, mipLevel: lod }, { buffer, bytesPerRow, rowsPerImage: size }, [ size, size, 6 ] );
+				device.queue.submit( [ encoder.finish() ] );
+
+				await buffer.mapAsync( GPUMapMode.READ );
+
+				const padded = new Uint8Array( buffer.getMappedRange() );
+				const packed = new Uint8Array( rowBytes * size * 6 );
+
+				for ( let row = 0; row < size * 6; row ++ ) {
+
+					packed.set( padded.subarray( row * bytesPerRow, row * bytesPerRow + rowBytes ), row * rowBytes );
+
+				}
+
+				buffer.destroy();
+
+				let binary = '';
+				for ( let i = 0; i < packed.length; i += 0x8000 ) binary += String.fromCharCode( ...packed.subarray( i, i + 0x8000 ) );
+
+				return { size, data: btoa( binary ) };
+
+			}
+
+			let result;
+
+			try {
+
+				result = { revision: THREE.REVISION, adapter: renderer.backend.isWebGPUBackend ? 'WebGPU' : 'WebGL', rows: await cases[ testCase ]() };
+
+			} catch ( error ) {
+
+				result = { error: error.stack || String( error ) };
+
+			}
+
+			document.getElementById( 'results' ).textContent = JSON.stringify( result, ( key, value ) => ( key === 'levels' ? undefined : typeof value === 'number' ? + value.toFixed( 3 ) : value ), 2 );
+			window.benchmarkResults = result;
+
+		</script>
+	</body>
+</html>
