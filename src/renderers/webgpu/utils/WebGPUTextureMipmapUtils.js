@@ -1,5 +1,6 @@
 import DataMap from '../../common/DataMap.js';
 import { GPUFeatureName, GPUTextureViewDimension } from './WebGPUConstants.js';
+import { submit } from './WebGPUUtils.js';
 
 // Compute mipmap generation, used when the renderer is created with
 // `mipmapGeneration: 'compute'`.
@@ -464,7 +465,7 @@ class WebGPUTextureMipmapUtils extends DataMap {
 
 		pass.end();
 
-		if ( encoder === null ) this.device.queue.submit( [ commandEncoder.finish() ] );
+		if ( encoder === null ) submit( this.device, commandEncoder.finish() );
 
 	}
 
