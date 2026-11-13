@@ -5,46 +5,61 @@ import { submit } from './WebGPUUtils.js';
 // Compute mipmap generation, used when the renderer is created with
 // `mipmapGeneration: 'compute'`.
 //
-// Vendored from the downsampler library (https://github.com/pmndrs/downsampler,
-// commit 488eff6): the WGSL generator of its 'exact' kernel and tail kernel
-// (src/webgpu/kernel.ts), the batch planner (src/core/plan.ts) and the pipeline
-// and bind group caching of its Downsampler (src/webgpu/downsampler.ts), reduced
-// to in-place 'average' chains. Keep it in sync with the library: its GPU suite
-// is the oracle for these kernels.
+// The module-level code is vendored from the downsampler library
+// (https://github.com/pmndrs/downsampler, commit da3e609): its single-file entry
+// `dist/mipmap.js` (built from src/mipmap.ts), adapted to three.js's code style. It holds
+// the WGSL generator of the 'exact' and tail kernels, the batch planner and the library's
+// per-device defaults. The generated WGSL must stay byte-identical to the library's: check
+// this file with `node scripts/check-vendored.mjs <this file>` in the library, which
+// compares `createMipmapKernel` against its golden kernels (test/golden/mipmap/). The
+// library's GPU suite is the oracle for these kernels; change them there first.
 //
-// Results match render-pass mipmaps ('exact' semantics): a batch's first level is
-// one bilinear sample at each texel centre in normalized coordinates, as a render
-// pass takes it, so odd sizes give the same result. Further levels of a batch are
-// exact 2:1 reductions in workgroup memory, so a batch ends where a non-unit
-// dimension is odd. Once a level fits one workgroup, a tail kernel finishes the
-// chain with the same rule, odd sizes included. Every level is quantized as
-// stored: normalized formats in integer units with ties to even, float16 rounded
-// to nearest even in the shader (the device's own conversion truncates on D3D12).
+// Results match render-pass mipmaps ('exact' semantics): a batch's first level is one
+// bilinear sample at each texel centre in normalized coordinates, as a render pass takes
+// it, so odd sizes give the same result. Further levels of a batch are exact 2:1
+// reductions in workgroup memory, so a batch ends where a non-unit dimension is odd. Once
+// a level fits one workgroup, a tail kernel finishes the chain with the same rule, odd
+// sizes included. Every level is quantized as stored: normalized formats in integer units
+// with ties to even, float16 rounded to nearest even in the shader (the device's own
+// conversion truncates on D3D12).
 
-const _formats = {
-	'rgba8unorm': { quantization: 'unorm8' },
-	'rgba8snorm': { quantization: 'snorm8' },
-	'bgra8unorm': { quantization: 'unorm8', feature: GPUFeatureName.BGRA8UNormStorage },
-	'r8unorm': { quantization: 'unorm8', feature: GPUFeatureName.TextureFormatsTier1 },
-	'rg8unorm': { quantization: 'unorm8', feature: GPUFeatureName.TextureFormatsTier1 },
-	'r8snorm': { quantization: 'snorm8', feature: GPUFeatureName.TextureFormatsTier1 },
-	'rg8snorm': { quantization: 'snorm8', feature: GPUFeatureName.TextureFormatsTier1 },
-	'r16unorm': { quantization: 'unorm16', feature: GPUFeatureName.TextureFormatsTier1 },
-	'rg16unorm': { quantization: 'unorm16', feature: GPUFeatureName.TextureFormatsTier1 },
-	'rgba16unorm': { quantization: 'unorm16', feature: GPUFeatureName.TextureFormatsTier1 },
-	'r16snorm': { quantization: 'snorm16', feature: GPUFeatureName.TextureFormatsTier1 },
-	'rg16snorm': { quantization: 'snorm16', feature: GPUFeatureName.TextureFormatsTier1 },
-	'rgba16snorm': { quantization: 'snorm16', feature: GPUFeatureName.TextureFormatsTier1 },
-	'rgba16float': { quantization: 'float16' },
-	'r16float': { quantization: 'float16', feature: GPUFeatureName.TextureFormatsTier1 },
-	'rg16float': { quantization: 'float16', feature: GPUFeatureName.TextureFormatsTier1 },
-	'rgba32float': { quantization: 'float32' },
-	'r32float': { quantization: 'float32' },
-	'rg32float': { quantization: 'float32' }
+// The formats compute mipmaps write: storage-capable formats with a float view. sRGB,
+// packed, rgb10a2unorm and integer formats keep render passes.
+const mipmapFormats = {
+	rgba8unorm: { quantization: 'unorm8', filterable: true },
+	rgba16float: { quantization: 'float16', filterable: true },
+	rgba8snorm: { quantization: 'snorm8', filterable: true },
+	bgra8unorm: { quantization: 'unorm8', filterable: true, feature: 'bgra8unorm-storage' },
+	r8unorm: { quantization: 'unorm8', filterable: true, feature: 'texture-formats-tier1' },
+	rg8unorm: { quantization: 'unorm8', filterable: true, feature: 'texture-formats-tier1' },
+	r16float: { quantization: 'float16', filterable: true, feature: 'texture-formats-tier1' },
+	rg16float: { quantization: 'float16', filterable: true, feature: 'texture-formats-tier1' },
+	r8snorm: { quantization: 'snorm8', filterable: true, feature: 'texture-formats-tier1' },
+	rg8snorm: { quantization: 'snorm8', filterable: true, feature: 'texture-formats-tier1' },
+	r16unorm: { quantization: 'unorm16', filterable: false, feature: 'texture-formats-tier1' },
+	rg16unorm: { quantization: 'unorm16', filterable: false, feature: 'texture-formats-tier1' },
+	rgba16unorm: { quantization: 'unorm16', filterable: false, feature: 'texture-formats-tier1' },
+	r16snorm: { quantization: 'snorm16', filterable: false, feature: 'texture-formats-tier1' },
+	rg16snorm: { quantization: 'snorm16', filterable: false, feature: 'texture-formats-tier1' },
+	rgba16snorm: { quantization: 'snorm16', filterable: false, feature: 'texture-formats-tier1' },
+	r32float: { quantization: 'float32', filterable: false },
+	rg32float: { quantization: 'float32', filterable: false }, // no storage in compatibility mode
+	rgba32float: { quantization: 'float32', filterable: false }
 };
 
-// Normalized values are reduced in integer units, so 2:1 averages are exact and ties round to even.
-const _integerDomains = {
+// How a batch reads its source level: 'sample' (one hardware bilinear sample) where the
+// format is filterable, float32 included with `float32-filterable`; else 'load'
+// (`textureLoad` with the bilinear weights computed in the shader). Both give the same rule.
+function mipmapAccess( format, features ) {
+
+	const info = mipmapFormats[ format ];
+
+	return info.filterable || ( info.quantization === 'float32' && features?.has( 'float32-filterable' ) === true ) ? 'sample' : 'load';
+
+}
+
+// Normalized formats are reduced in integer units, so 2:1 averages are exact and ties round to even.
+const integerDomains = {
 	unorm8: { scale: 255, min: 0, max: 255 },
 	snorm8: { scale: 127, min: - 127, max: 127 },
 	unorm16: { scale: 65535, min: 0, max: 65535 },
@@ -52,9 +67,9 @@ const _integerDomains = {
 };
 
 // Largest first output of a tail batch: one 32×32 workgroup tile.
-const TAIL_TILE = 32;
+const tailTile = 32;
 
-const mipSize = ( size, level ) => Math.max( 1, size >> level );
+const mipSize = ( size, level ) => Math.max( 1, Math.floor( size / 2 ** level ) );
 
 // First-output tile of a batch of `count` levels: 8×8 up to four levels, 16×16 for five, 32×32 for six.
 const tileSize = ( count ) => Math.max( 8, 1 << ( count - 1 ) );
@@ -63,24 +78,37 @@ const tileSize = ( count ) => Math.max( 8, 1 << ( count - 1 ) );
 const workgroupSide = ( tile ) => Math.min( tile, 16 );
 
 // Tail tile: the first output's larger side, rounded up to 8, 16 or 32.
-const tailTileFor = ( width, height ) => Math.min( TAIL_TILE, Math.max( 8, 2 ** Math.ceil( Math.log2( Math.max( width, height ) ) ) ) );
+const tailTileFor = ( width, height ) => Math.min( tailTile, Math.max( 8, 2 ** Math.ceil( Math.log2( Math.max( width, height ) ) ) ) );
 
-/**
- * Splits the mip chain of a `width` × `height` texture into dispatches. A batch
- * reads one level and writes up to `levelsPerDispatch` levels; it ends early where
- * a non-unit dimension of its last level is odd. Once a first output fits
- * `tailMaxTile`², one tail batch finishes the chain.
- *
- * @private
- * @param {number} width - The width of level 0.
- * @param {number} height - The height of level 0.
- * @param {number} mipLevelCount - The levels of the texture.
- * @param {number} levelsPerDispatch - The most levels one dispatch writes (1–6).
- * @param {number} tailMaxTile - The largest tail tile (8 or 32).
- * @param {number} exactMinTile - The smallest tile of regular batches (8, 16 or 32).
- * @return {Array<Object>} The batches.
- */
-function planBatches( width, height, mipLevelCount, levelsPerDispatch, tailMaxTile, exactMinTile ) {
+// The library's defaults for a device:
+// - Five and six levels per dispatch take 16 × 16 invocations, so they need
+//   `maxComputeInvocationsPerWorkgroup` ≥ 256 (compatibility mode defaults to 128).
+// - 'exact' tiles: 32×32 (16 × 16 invocations, 2 × 2 texels each) was fastest on NVIDIA and
+//   Intel, 16×16 on Apple GPUs; 8×8 below 256 invocations and on fallback (software)
+//   adapters, which take 30 s or more to compile a 32×32-tile pipeline.
+function kernelDefaults( limits, adapterInfo ) {
+
+	const wide = limits.maxComputeInvocationsPerWorkgroup >= 256;
+	const invocations = wide ? 6 : 4;
+	const software = adapterInfo?.isFallbackAdapter === true;
+
+	return {
+		levelsPerDispatch: Math.min( invocations, limits.maxStorageTexturesPerShaderStage ),
+		exactTile: wide && ! software ? ( adapterInfo?.vendor === 'apple' ? 16 : 32 ) : 8,
+		tailMaxTile: wide ? tailTile : 8,
+		tail: true
+	};
+
+}
+
+// Splits the mip chain of a `width` × `height` level 0 into dispatches. A batch reads one
+// level and writes up to `levelsPerDispatch` levels; it ends early where a non-unit
+// dimension of its last level is odd. With `tail` (default), once a first output fits
+// `tailMaxTile`², one tail batch finishes the chain.
+function planMipmapBatches( width, height, options ) {
+
+	const { levelsPerDispatch, tail = true, tailMaxTile = tailTile, exactTile = 8 } = options;
+	const mipLevelCount = options.mipLevelCount ?? Math.floor( Math.log2( Math.max( width, height ) ) ) + 1;
 
 	const batches = [];
 	const lastLevel = mipLevelCount - 1;
@@ -88,13 +116,13 @@ function planBatches( width, height, mipLevelCount, levelsPerDispatch, tailMaxTi
 	for ( let level = 1; level <= lastLevel; ) {
 
 		const outputWidth = mipSize( width, level ), outputHeight = mipSize( height, level );
-		let count = 1, w = outputWidth, h = outputHeight;
+		let count = 1, cw = outputWidth, ch = outputHeight;
 
 		// Continue in workgroup memory only while each non-unit dimension halves exactly.
-		while ( count < levelsPerDispatch && level + count <= lastLevel && ( w === 1 || w % 2 === 0 ) && ( h === 1 || h % 2 === 0 ) ) {
+		while ( count < levelsPerDispatch && level + count <= lastLevel && ( cw === 1 || cw % 2 === 0 ) && ( ch === 1 || ch % 2 === 0 ) ) {
 
-			w = Math.max( 1, w / 2 );
-			h = Math.max( 1, h / 2 );
+			cw = Math.max( 1, cw / 2 );
+			ch = Math.max( 1, ch / 2 );
 			count ++;
 
 		}
@@ -102,16 +130,16 @@ function planBatches( width, height, mipLevelCount, levelsPerDispatch, tailMaxTi
 		// The tail: one workgroup finishes what would otherwise take more batches.
 		const tailCount = Math.min( levelsPerDispatch, lastLevel - level + 1 );
 
-		if ( count < tailCount && outputWidth <= tailMaxTile && outputHeight <= tailMaxTile ) {
+		if ( tail && count < tailCount && outputWidth <= tailMaxTile && outputHeight <= tailMaxTile ) {
 
-			batches.push( { tail: true, sourceMipLevel: level - 1, count: tailCount, tile: tailTileFor( outputWidth, outputHeight ), groupsX: 1, groupsY: 1 } );
+			batches.push( { kernel: 'tail', sourceMipLevel: level - 1, firstMipLevel: level, count: tailCount, outputWidth, outputHeight, tile: tailTileFor( outputWidth, outputHeight ), groupsX: 1, groupsY: 1 } );
 			level += tailCount;
 			continue;
 
 		}
 
-		const tile = Math.max( exactMinTile, tileSize( count ) );
-		batches.push( { tail: false, sourceMipLevel: level - 1, count, tile, groupsX: Math.ceil( outputWidth / tile ), groupsY: Math.ceil( outputHeight / tile ) } );
+		const tile = Math.max( exactTile, tileSize( count ) );
+		batches.push( { kernel: 'exact', sourceMipLevel: level - 1, firstMipLevel: level, count, outputWidth, outputHeight, tile, groupsX: Math.ceil( outputWidth / tile ), groupsY: Math.ceil( outputHeight / tile ) } );
 		level += count;
 
 	}
@@ -120,11 +148,11 @@ function planBatches( width, height, mipLevelCount, levelsPerDispatch, tailMaxTi
 
 }
 
-// float16: round each channel to the nearest even half, as f32. In the half normal range the f32
-// bits are rounded to 10 mantissa bits with integer math (a carry into the exponent is correct);
-// below it, round( x · 2^24 ) · 2^-24. Not ( x + c ) - c, which fast math folds to x on Metal.
-const float16Wgsl = /* wgsl */`
-fn ds_round_f16(v: vec4f) -> vec4f {
+// WGSL of `ds_round_f16(v: vec4f) -> vec4f`: each channel rounded to the nearest even half, as
+// f32. In the half normal range the f32 bits are rounded to 10 mantissa bits with integer math
+// (a carry into the exponent is correct); below it, round( x · 2^24 ) · 2^-24. Not
+// ( x + c ) - c, which fast math folds to x on Metal.
+const float16RoundWgsl = `fn ds_round_f16(v: vec4f) -> vec4f {
 	let bits = bitcast<vec4u>(v);
 	let a = bits & vec4u(0x7fffffffu);
 	let normal = (a + vec4u(0xfffu) + ((a >> vec4u(13u)) & vec4u(1u))) & vec4u(0xffffe000u);
@@ -136,33 +164,40 @@ fn ds_round_f16(v: vec4f) -> vec4f {
 `;
 
 /**
- * Returns the WGSL of one batch. Bindings: 0 sampler ('sample' access only),
- * 1 the source level, 2… one write-only storage texture per output level.
+ * Returns the WGSL of one in-place batch. Bindings (group 0): 0 a filtering sampler ('sample'
+ * only), 1 the source level, 2 … count + 1 one write-only storage texture per output level.
  * Workgroup z selects the array layer.
  *
- * Each workgroup writes a tile×tile block of the first output. Adjacent invocations
- * read and store adjacent texels (a 2×2 block per invocation measured 30–45 %
- * slower). Later levels are 2:1 reductions of the tile in workgroup memory, with
- * clamped reads for unit dimensions and partial tiles. A tail kernel is one
- * workgroup: the first output as above, then each further level from the previous
- * one by the same rule at any parity, with bilinear weights computed in the shader.
+ * Each workgroup writes a tile×tile block of the first output. Adjacent invocations read and
+ * store adjacent texels (a 2×2 block per invocation measured 30–45 % slower). Later levels are
+ * 2:1 reductions of the tile in workgroup memory, with clamped reads for unit dimensions and
+ * partial tiles. A tail kernel is one workgroup: the first output as above, then each further
+ * level from the previous one by the same rule at any parity, with shader bilinear weights.
+ *
+ * Exported for the library's drift check only (see the header).
  *
  * @private
- * @param {string} format - The texture format.
- * @param {string} dimension - The view dimension, '2d' or '2d-array'.
- * @param {number} count - The levels written by the dispatch.
- * @param {string} access - 'sample' (filterable formats) or 'load'.
- * @param {boolean} tail - Whether this is a tail kernel.
- * @param {number} tile - The first-output tile edge (8, 16 or 32).
+ * @param {Object} options - The kernel options: `format`, `dimension` ('2d' or '2d-array'), `count` (1–6 levels), `access` ('sample' or 'load'), `tail` and `tile` (8, 16 or 32).
  * @return {string} The WGSL code.
  */
-function createKernel( format, dimension, count, access, tail, tile ) {
+function createMipmapKernel( options ) {
 
-	const quantization = _formats[ format ].quantization;
-	const domain = _integerDomains[ quantization ];
+	const { format, dimension = '2d', count, tail = false, access = 'sample' } = options;
+
+	const info = Object.prototype.hasOwnProperty.call( mipmapFormats, format ) ? mipmapFormats[ format ] : undefined;
+
+	if ( info === undefined ) throw new Error( `WebGPUTextureMipmapUtils: Format ${ format } is not supported.` );
+	if ( options.f16Rounding !== undefined && options.f16Rounding !== 'nearest' ) throw new Error( 'WebGPUTextureMipmapUtils: Only f16Rounding "nearest" is supported.' );
+
+	const tile = options.tile ?? ( tail ? tailTile : tileSize( count ) );
 	const array = dimension === GPUTextureViewDimension.TwoDArray;
 	const suffix = array ? '_array' : '';
 	const layer = array ? ', i32(group.z)' : '';
+	const quantization = info.quantization;
+	const domain = quantization === 'float16' || quantization === 'float32' ? undefined : integerDomains[ quantization ];
+
+	// Single-channel formats read as ( v, 0, 0, 1 ): splat the channel.
+	const splat = /^r\d/.test( format ) ? '.xxxx' : '';
 	const side = workgroupSide( tile );
 	const samples = tile / side;
 
@@ -171,6 +206,8 @@ function createKernel( format, dimension, count, access, tail, tile ) {
 	code += `@group(0) @binding(1) var source: texture_2d${ suffix }<f32>;
 var<workgroup> tile: array<vec4f, ${ tile * tile }>;
 `;
+
+	if ( quantization === 'float16' ) code += float16RoundWgsl;
 
 	for ( let i = 0; i < count; i ++ ) {
 
@@ -197,7 +234,7 @@ fn quantize(value: vec4f) -> vec4f {
 
 	} else if ( quantization === 'float16' ) {
 
-		code += float16Wgsl + `
+		code += `
 const SCALE = 1.0;
 fn quantize(value: vec4f) -> vec4f { return ds_round_f16(value); }
 `;
@@ -211,30 +248,37 @@ fn quantize(value: vec4f) -> vec4f { return value; }
 
 	}
 
+	if ( access === 'load' ) {
+
+		// Normalized texels are rounded back to exact integer units, so later sums are exact.
+		code += `
+fn load(p: vec2u, layer: u32) -> vec4f {
+	let v = textureLoad(source, vec2i(p)${ array ? ', i32(layer)' : '' }, 0)${ splat } * SCALE;
+	return ${ domain !== undefined ? 'round(v)' : 'v' };
+}
+`;
+
+	}
+
+	code += `
+fn first(pos: vec2u, size: vec2u, layer: u32) -> vec4f {
+`;
+
 	if ( access === 'sample' ) {
 
-		code += `
-fn first(pos: vec2u, size: vec2u, layer: u32) -> vec4f {
-	let uv = (vec2f(pos) + 0.5) / vec2f(size);
-	return quantize(textureSampleLevel(source, imageSampler, uv${ array ? ', i32(layer)' : '' }, 0.0) * SCALE);
-}
+		code += `	let uv = (vec2f(pos) + 0.5) / vec2f(size);
+	return quantize(textureSampleLevel(source, imageSampler, uv${ array ? ', i32(layer)' : '' }, 0.0)${ splat } * SCALE);
 `;
 
 	} else {
 
 		// Bilinear weights at the output texel centre, as the sampler applies them but without its
 		// fixed-point weight rounding. The sample position (x + 0.5) * S / n - 0.5 is
-		// ((2x + 1) * S - n) / 2n: integer math keeps the base texel exact (GPU float division isn't
-		// correctly rounded), and gives weights of exactly 0 or 0.5 at even sizes. Normalized texels
-		// are rounded back to exact integer units on load, so later sums are exact.
-		code += `
-fn load(p: vec2u, layer: u32) -> vec4f {
-	let v = textureLoad(source, vec2i(p)${ array ? ', i32(layer)' : '' }, 0) * SCALE;
-	return ${ domain !== undefined ? 'round(v)' : 'v' };
-}
-
-fn first(pos: vec2u, size: vec2u, layer: u32) -> vec4f {
-	let sourceSize = textureDimensions(source);
+		// ((2x + 1) * S - n) / 2n: integer math keeps the base texel exact (GPU float division
+		// isn't correctly rounded), and gives weights of exactly 0 or 0.5 at even sizes. A
+		// same-size level reads its texel alone (never in place; kept for the library's copies).
+		code += `	let sourceSize = textureDimensions(source);
+	if (all(sourceSize == size)) { return quantize(load(pos, layer)); }
 	let last = sourceSize - vec2u(1);
 	let numerator = (2u * pos + vec2u(1)) * sourceSize - size;
 	let denominator = 2u * size;
@@ -244,10 +288,11 @@ fn first(pos: vec2u, size: vec2u, layer: u32) -> vec4f {
 	let top = mix(load(lo, layer), load(vec2u(hi.x, lo.y), layer), f.x);
 	let bottom = mix(load(vec2u(lo.x, hi.y), layer), load(hi, layer), f.x);
 	return quantize(mix(top, bottom, f.y));
-}
 `;
 
 	}
+
+	code += '}\n';
 
 	// Later sizes are derived from the first (floored halves, at least 1), not queried:
 	// textureDimensions on a storage texture is a resource query per call.
@@ -299,8 +344,8 @@ fn main(@builtin(local_invocation_id) local: vec3u, @builtin(workgroup_id) group
 
 		if ( tail ) {
 
-			// The first output fits the tile, so every later level fits half of it, at most
-			// the workgroup's side: one texel per invocation.
+			// The first output fits the tile, so every later level fits half of it, at most the
+			// workgroup's side: one texel per invocation.
 			code += `
 	workgroupBarrier();
 	{
@@ -385,22 +430,17 @@ class WebGPUTextureMipmapUtils extends DataMap {
 		 */
 		this.compatibilityMode = ! device.features.has( GPUFeatureName.CoreFeaturesAndLimits );
 
-		// 5 and 6 levels take 16 × 16 invocations.
-		const wide = device.limits.maxComputeInvocationsPerWorkgroup >= 256;
+		const { levelsPerDispatch, exactTile, tailMaxTile } = kernelDefaults( device.limits, device.adapterInfo );
 
 		/**
 		 * The most levels one dispatch writes: one storage texture binding per level.
 		 *
 		 * @type {number}
 		 */
-		this.levelsPerDispatch = Math.max( 1, Math.min( wide ? 6 : 4, device.limits.maxStorageTexturesPerShaderStage ) );
+		this.levelsPerDispatch = levelsPerDispatch;
 
-		// Regular batches: 32×32 tiles (16 × 16 invocations, 2 × 2 texels each) were fastest on
-		// NVIDIA and Intel, 16×16 on Apple GPUs. Software adapters compile 32×32 tiles slowly.
-		const info = device.adapterInfo;
-
-		this.exactMinTile = wide && info?.isFallbackAdapter !== true ? ( info?.vendor === 'apple' ? 16 : 32 ) : 8;
-		this.tailMaxTile = wide ? TAIL_TILE : 8;
+		this.exactTile = exactTile;
+		this.tailMaxTile = tailMaxTile;
 
 		this.sampler = device.createSampler( { label: 'mipmapComputeSampler', minFilter: 'linear', magFilter: 'linear' } );
 		this.pipelines = new Map();
@@ -416,7 +456,7 @@ class WebGPUTextureMipmapUtils extends DataMap {
 	 */
 	isFormatSupported( format ) {
 
-		const info = _formats[ format ];
+		const info = Object.prototype.hasOwnProperty.call( mipmapFormats, format ) ? mipmapFormats[ format ] : undefined;
 
 		return this.compatibilityMode === false && info !== undefined && ( info.feature === undefined || this.device.features.has( info.feature ) );
 
@@ -482,21 +522,26 @@ class WebGPUTextureMipmapUtils extends DataMap {
 
 		// Layers and cube faces are views of a 2d-array (not available in compatibility mode).
 		const dimension = textureGPU.depthOrArrayLayers > 1 ? GPUTextureViewDimension.TwoDArray : GPUTextureViewDimension.TwoD;
-		const access = this._getAccess( format );
+		const access = mipmapAccess( format, this.device.features );
 		const view = ( level ) => textureGPU.createView( { label: `mipmapCompute ${ level }`, dimension, baseMipLevel: level, mipLevelCount: 1 } );
 
-		const batches = planBatches( textureGPU.width, textureGPU.height, textureGPU.mipLevelCount, this.levelsPerDispatch, this.tailMaxTile, this.exactMinTile );
+		const batches = planMipmapBatches( textureGPU.width, textureGPU.height, {
+			mipLevelCount: textureGPU.mipLevelCount,
+			levelsPerDispatch: this.levelsPerDispatch,
+			tailMaxTile: this.tailMaxTile,
+			exactTile: this.exactTile
+		} );
 
 		return batches.map( ( batch ) => {
 
-			const { pipeline, layout } = this._getPipeline( format, dimension, batch.count, access, batch.tail, batch.tile );
+			const { pipeline, layout } = this._getPipeline( format, dimension, batch.count, access, batch.kernel === 'tail', batch.tile );
 
 			const entries = access === 'sample' ? [ { binding: 0, resource: this.sampler } ] : [];
 			entries.push( { binding: 1, resource: view( batch.sourceMipLevel ) } );
 
 			for ( let i = 0; i < batch.count; i ++ ) {
 
-				entries.push( { binding: i + 2, resource: view( batch.sourceMipLevel + 1 + i ) } );
+				entries.push( { binding: i + 2, resource: view( batch.firstMipLevel + i ) } );
 
 			}
 
@@ -505,25 +550,6 @@ class WebGPUTextureMipmapUtils extends DataMap {
 			return { pipeline, bindGroup, groupsX: batch.groupsX, groupsY: batch.groupsY };
 
 		} );
-
-	}
-
-	/**
-	 * Returns how a batch reads its source level: a filtering sampler where the
-	 * format allows it, else `textureLoad` with weights computed in the shader.
-	 *
-	 * @private
-	 * @param {string} format - The GPU texture format.
-	 * @return {string} 'sample' or 'load'.
-	 */
-	_getAccess( format ) {
-
-		const quantization = _formats[ format ].quantization;
-
-		if ( quantization === 'unorm16' || quantization === 'snorm16' ) return 'load';
-		if ( quantization === 'float32' ) return this.device.features.has( GPUFeatureName.Float32Filterable ) ? 'sample' : 'load';
-
-		return 'sample';
 
 	}
 
@@ -549,7 +575,7 @@ class WebGPUTextureMipmapUtils extends DataMap {
 
 			const layout = this._getLayout( format, dimension, count, access );
 			const label = `mipmapCompute ${ key }`;
-			const module = this.device.createShaderModule( { label, code: createKernel( format, dimension, count, access, tail, tile ) } );
+			const module = this.device.createShaderModule( { label, code: createMipmapKernel( { format, dimension, count, access, tail, tile } ) } );
 
 			const pipeline = this.device.createComputePipeline( {
 				label,
@@ -607,5 +633,7 @@ class WebGPUTextureMipmapUtils extends DataMap {
 	}
 
 }
+
+export { createMipmapKernel };
 
 export default WebGPUTextureMipmapUtils;
