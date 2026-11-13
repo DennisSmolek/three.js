@@ -20,16 +20,33 @@
 			// Compares mipmaps generated with `mipmapGeneration: 'compute'` against the
 			// default render-pass mipmaps of the same level 0, for every level and layer.
 			// Run with: npm run test-webgpu-mipmaps
+			//
+			// ?limit=4: request maxStorageTexturesPerShaderStage 4 (four levels per dispatch).
+			// ?compat: compatibility-mode devices, where every texture keeps render passes.
 
 			import * as THREE from 'three/webgpu';
 			import { screenCoordinate, vec2, vec4, fract, sin, dot, uniform } from 'three/tsl';
 
+			const params = new URLSearchParams( location.search );
+			const compat = params.has( 'compat' );
 			const renderers = {};
 			const errors = [];
 
 			for ( const mipmapGeneration of [ 'render', 'compute' ] ) {
 
-				const renderer = new THREE.WebGPURenderer( { mipmapGeneration } );
+				const options = { mipmapGeneration };
+
+				if ( params.has( 'limit' ) ) options.requiredLimits = { maxStorageTexturesPerShaderStage: Number( params.get( 'limit' ) ) };
+
+				if ( compat ) {
+
+					// The adapter's features, as the renderer requests them, except 'core-features-and-limits'.
+					const adapter = await navigator.gpu.requestAdapter( { featureLevel: 'compatibility' } );
+					options.device = await adapter.requestDevice( { requiredFeatures: [ ...adapter.features ].filter( ( feature ) => feature !== 'core-features-and-limits' ) } );
+
+				}
+
+				const renderer = new THREE.WebGPURenderer( options );
 				await renderer.init();
 				renderer.backend.device.addEventListener( 'uncapturederror', ( event ) => errors.push( `${ mipmapGeneration }: ${ event.error.message }` ) );
 				renderers[ mipmapGeneration ] = renderer;
@@ -274,13 +291,13 @@
 						level: index,
 						size: `${ level.width }×${ level.height }×${ level.layers }`,
 						chain: compare( level, render.levels[ index ], scale ),
-						step: index === 0 || sRGB ? null : compare( level, await renderPassFrom( compute.levels[ index - 1 ] ), scale, compute.levels[ index - 1 ] )
+						step: index === 0 || sRGB || compat ? null : compare( level, await renderPassFrom( compute.levels[ index - 1 ] ), scale, compute.levels[ index - 1 ] )
 					} );
 
 				}
 
 				const path = compute.compute ? 'compute' : 'render';
-				const expectedPath = expected === 'r8unorm' ? ( renderers.compute.backend.device.features.has( 'texture-formats-tier1' ) ? 'compute' : 'render' ) : expected;
+				const expectedPath = compat ? 'render' : expected === 'r8unorm' ? ( renderers.compute.backend.device.features.has( 'texture-formats-tier1' ) ? 'compute' : 'render' ) : expected;
 				const later = levels.slice( 1 );
 
 				results.push( {
@@ -298,6 +315,7 @@
 
 			window.testResults = {
 				adapter: device.adapterInfo ? `${ device.adapterInfo.vendor } ${ device.adapterInfo.architecture }` : 'unknown',
+				compatibilityMode: renderers.compute.backend.compatibilityMode,
 				maxStorageTexturesPerShaderStage: device.limits.maxStorageTexturesPerShaderStage,
 				levelsPerDispatch: renderers.compute.backend.textureUtils._mipmapUtils?.levelsPerDispatch,
 				errors,
