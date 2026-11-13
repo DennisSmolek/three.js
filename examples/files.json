@@ -513,6 +513,7 @@
 		"webgpu_textures_2d-array",
 		"webgpu_textures_2d-array_compressed",
 		"webgpu_textures_anisotropy",
+		"webgpu_textures_mipmaps_compute",
 		"webgpu_textures_partialupdate",
 		"webgpu_tonemapping",
 		"webgpu_tsl_angular_slicing",

@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<title>three.js webgpu - compute mipmaps</title>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+		<meta property="og:title" content="three.js webgpu - compute mipmaps">
+		<meta property="og:type" content="website">
+		<meta property="og:url" content="https://threejs.org/examples/webgpu_textures_mipmaps_compute.html">
+		<meta property="og:image" content="https://threejs.org/examples/screenshots/webgpu_textures_mipmaps_compute.jpg">
+		<link type="text/css" rel="stylesheet" href="example.css">
+		<style>
+			#container {
+				display: flex;
+				position: absolute;
+				inset: 0;
+			}
+
+			#container > div {
+				position: relative;
+				flex: 1;
+			}
+
+			.lbl {
+				color: #fff;
+				font: 14px monospace;
+				position: absolute;
+				bottom: 0px;
+				left: 0px;
+				z-index: 100;
+				text-shadow: #000 1px 1px 1px;
+				background-color: rgba( 0, 0, 0, 0.75 );
+				padding: 1em;
+			}
+
+			.c { color: #fa0 }
+		</style>
+	</head>
+
+	<body>
+
+		<div id="info">
+			<a href="https://threejs.org/" target="_blank" rel="noopener" class="logo-link"></a>
+
+			<div class="title-wrapper">
+				<a href="https://threejs.org/" target="_blank" rel="noopener">three.js</a><span>Compute Mipmaps</span>
+			</div>
+
+			<small>
+				An animated render target with mipmaps, generated every frame with render passes (left) and compute shaders (right).
+			</small>
+		</div>
+
+		<div id="container">
+			<div id="render"><div class="lbl">mipmapGeneration: <span class="c">'render'</span></div></div>
+			<div id="compute"><div class="lbl">mipmapGeneration: <span class="c">'compute'</span></div></div>
+		</div>
+
+		<script type="importmap">
+			{
+				"imports": {
+					"three": "../build/three.webgpu.js",
+					"three/webgpu": "../build/three.webgpu.js",
+					"three/tsl": "../build/three.tsl.js",
+					"three/addons/": "./jsm/"
+				}
+			}
+		</script>
+
+		<script type="module">
+
+			import * as THREE from 'three/webgpu';
+			import { texture, uv, uniform, vec2, vec3, sin, cos, fract, step, length, mix } from 'three/tsl';
+
+			import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
+
+			const params = {
+				size: '1920x1080',
+				type: 'UnsignedByteType',
+				level: - 1,
+				animate: true
+			};
+
+			const views = [];
+			const elapsed = uniform( 0 );
+			const level = uniform( 0 );
+
+			// The source pattern: fine lines and rings that alias without mipmaps.
+
+			const p = uv().sub( 0.5 ).mul( vec2( 16, 9 ) );
+			const rings = step( 0.5, fract( length( p ).mul( 2 ).sub( elapsed ) ) );
+			const lines = step( 0.95, fract( p.x.mul( 4 ).add( sin( p.y.add( elapsed ) ) ) ) );
+			const tint = vec3( sin( elapsed.mul( 0.3 ) ).mul( 0.5 ).add( 0.5 ), 0.35, cos( elapsed.mul( 0.2 ) ).mul( 0.5 ).add( 0.5 ) );
+			const sourceMaterial = new THREE.MeshBasicNodeMaterial();
+			sourceMaterial.colorNode = mix( vec3( 0.05, 0.06, 0.1 ), tint, rings ).add( lines.mul( 0.8 ) );
+
+			const quad = new THREE.QuadMesh( sourceMaterial );
+
+			const camera = new THREE.PerspectiveCamera( 50, 1, 0.1, 200 );
+			camera.position.set( 0, 2, 6 );
+			camera.lookAt( 0, 0, - 10 );
+
+			init();
+
+			async function init() {
+
+				for ( const mipmapGeneration of [ 'render', 'compute' ] ) {
+
+					const container = document.getElementById( mipmapGeneration );
+
+					const renderer = new THREE.WebGPURenderer( { antialias: true, mipmapGeneration } );
+					renderer.setPixelRatio( window.devicePixelRatio );
+					await renderer.init();
+					container.appendChild( renderer.domElement );
+
+					const material = new THREE.MeshBasicNodeMaterial();
+
+					const scene = new THREE.Scene();
+					scene.background = new THREE.Color( 0x111111 );
+
+					const plane = new THREE.Mesh( new THREE.PlaneGeometry( 40, 200 ), material );
+					plane.rotation.x = - Math.PI / 2;
+					plane.position.z = - 90;
+					scene.add( plane );
+
+					views.push( { container, renderer, scene, material, target: null } );
+
+				}
+
+				const gui = new GUI();
+				gui.add( params, 'size', [ '1920x1080', '1129x635', '1024x1024' ] ).onChange( createTargets );
+				gui.add( params, 'type', { 'rgba8unorm': 'UnsignedByteType', 'rgba16float': 'HalfFloatType', 'rgba8unorm-srgb (render fallback)': 'SRGB' } ).onChange( createTargets );
+				gui.add( params, 'level', - 1, 10, 1 ).name( 'mip level (-1: auto)' ).onChange( updateMaterials );
+				gui.add( params, 'animate' );
+
+				createTargets();
+
+				window.addEventListener( 'resize', onWindowResize );
+				onWindowResize();
+
+				views[ 0 ].renderer.setAnimationLoop( animate );
+
+			}
+
+			function createTargets() {
+
+				const [ width, height ] = params.size.split( 'x' ).map( Number );
+
+				for ( const view of views ) {
+
+					if ( view.target !== null ) view.target.dispose();
+
+					view.target = new THREE.RenderTarget( width, height, {
+						type: params.type === 'HalfFloatType' ? THREE.HalfFloatType : THREE.UnsignedByteType,
+						colorSpace: params.type === 'SRGB' ? THREE.SRGBColorSpace : THREE.NoColorSpace,
+						generateMipmaps: true,
+						minFilter: THREE.LinearMipmapLinearFilter,
+						depthBuffer: false
+					} );
+
+					view.target.texture.wrapS = view.target.texture.wrapT = THREE.RepeatWrapping;
+
+				}
+
+				updateMaterials();
+
+			}
+
+			function updateMaterials() {
+
+				level.value = params.level;
+
+				for ( const view of views ) {
+
+					const map = texture( view.target.texture, uv().mul( vec2( 2, 10 ) ) );
+
+					view.material.colorNode = params.level < 0 ? map : map.level( level );
+					view.material.needsUpdate = true;
+
+				}
+
+			}
+
+			function onWindowResize() {
+
+				for ( const view of views ) {
+
+					view.renderer.setSize( view.container.clientWidth, view.container.clientHeight );
+
+				}
+
+				camera.aspect = views[ 0 ].container.clientWidth / views[ 0 ].container.clientHeight;
+				camera.updateProjectionMatrix();
+
+			}
+
+			function animate( timestamp ) {
+
+				if ( params.animate ) elapsed.value = timestamp / 1000;
+
+				for ( const { renderer, scene, target } of views ) {
+
+					// The render target's mipmaps are generated after each render into it.
+
+					renderer.setRenderTarget( target );
+					quad.render( renderer );
+
+					renderer.setRenderTarget( null );
+					renderer.render( scene, camera );
+
+				}
+
+			}
+
+		</script>
+
+	</body>
+</html>
