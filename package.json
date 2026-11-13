@@ -67,6 +67,7 @@
     "test-e2e": "node test/e2e/puppeteer.js",
     "test-e2e-cov": "node test/e2e/check-coverage.js",
     "test-e2e-webgpu": "node test/e2e/puppeteer.js --webgpu",
+    "test-webgpu-mipmaps": "node test/webgpu/mipmaps-compute.js",
     "test-treeshake": "rollup -c test/rollup.treeshake.config.js",
     "make-screenshot": "node test/e2e/puppeteer.js --make",
     "make-tsl-reference": "node test/unit/tsl/make.js"

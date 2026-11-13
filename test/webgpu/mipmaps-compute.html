@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<title>three.js - compute mipmaps parity test</title>
+		<meta charset="utf-8">
+	</head>
+	<body>
+
+		<script type="importmap">
+			{
+				"imports": {
+					"three/webgpu": "../../src/Three.WebGPU.js",
+					"three/tsl": "../../src/Three.TSL.js"
+				}
+			}
+		</script>
+
+		<script type="module">
+
+			// Compares mipmaps generated with `mipmapGeneration: 'compute'` against the
+			// default render-pass mipmaps of the same level 0, for every level and layer.
+			// Run with: npm run test-webgpu-mipmaps
+
+			import * as THREE from 'three/webgpu';
+			import { screenCoordinate, vec2, vec4, fract, sin, dot, uniform } from 'three/tsl';
+
+			const renderers = {};
+			const errors = [];
+
+			for ( const mipmapGeneration of [ 'render', 'compute' ] ) {
+
+				const renderer = new THREE.WebGPURenderer( { mipmapGeneration } );
+				await renderer.init();
+				renderer.backend.device.addEventListener( 'uncapturederror', ( event ) => errors.push( `${ mipmapGeneration }: ${ event.error.message }` ) );
+				renderers[ mipmapGeneration ] = renderer;
+
+			}
+
+			// Per-texel noise over smooth gradients, so every level and every odd edge matters.
+
+			const scale = uniform( 1 );
+			const seed = uniform( 0 );
+
+			const hash = ( p, k ) => fract( sin( dot( p, vec2( 12.9898, 78.233 ) ).add( seed ).add( k ) ).mul( 43758.5453 ) );
+
+			const pixel = screenCoordinate.xy.floor();
+			const material = new THREE.MeshBasicNodeMaterial();
+			material.colorNode = vec4( hash( pixel, 0 ), hash( pixel, 1.7 ).mul( 0.5 ).add( pixel.x.mul( 0.001 ).sin().mul( 0.25 ).add( 0.25 ) ), hash( pixel, 3.1 ), hash( pixel, 5.3 ) ).mul( scale );
+
+			const quad = new THREE.QuadMesh( material );
+
+			const cubeScene = new THREE.Scene();
+			cubeScene.add( new THREE.Mesh( new THREE.SphereGeometry( 1, 64, 32 ), Object.assign( new THREE.MeshBasicNodeMaterial( { side: THREE.BackSide } ), { colorNode: material.colorNode } ) ) );
+
+			function random( length, generator ) {
+
+				let state = 1234567;
+				const next = () => ( state = ( Math.imul( state, 1664525 ) + 1013904223 ) >>> 0 ) / 4294967296;
+
+				return Array.from( { length }, () => generator( next() ) );
+
+			}
+
+			function dataTexture( { width, height, depth = 1, format = THREE.RGBAFormat, type = THREE.UnsignedByteType, colorSpace = THREE.NoColorSpace } ) {
+
+				const channels = format === THREE.RedFormat ? 1 : 4;
+				const length = width * height * depth * channels;
+
+				let data;
+
+				if ( type === THREE.UnsignedByteType ) data = new Uint8Array( random( length, ( r ) => Math.floor( r * 256 ) ) );
+				else if ( type === THREE.HalfFloatType ) data = new Uint16Array( random( length, ( r ) => THREE.DataUtils.toHalfFloat( r * 4 ) ) );
+				else data = new Float32Array( random( length, ( r ) => r * 4 ) );
+
+				return () => {
+
+					const texture = depth > 1 ? new THREE.DataArrayTexture( data, width, height, depth ) : new THREE.DataTexture( data, width, height );
+					texture.format = format;
+					texture.type = type;
+					texture.colorSpace = colorSpace;
+					texture.generateMipmaps = true;
+					texture.minFilter = THREE.LinearMipmapLinearFilter;
+					texture.needsUpdate = true;
+
+					return { texture, update: ( renderer ) => renderer.initTexture( texture ), dispose: () => texture.dispose() };
+
+				};
+
+			}
+
+			function renderTarget( width, height, options = {} ) {
+
+				return () => {
+
+					const target = new THREE.RenderTarget( width, height, { generateMipmaps: true, minFilter: THREE.LinearMipmapLinearFilter, depthBuffer: false, ...options } );
+
+					return { texture: target.texture, update: ( renderer ) => {
+
+						scale.value = options.type === THREE.HalfFloatType ? 4 : 1;
+						renderer.setRenderTarget( target );
+						quad.render( renderer );
+						renderer.setRenderTarget( null );
+
+					}, dispose: () => target.dispose() };
+
+				};
+
+			}
+
+			function cubeTarget( size, options = {} ) {
+
+				return () => {
+
+					const target = new THREE.CubeRenderTarget( size, { generateMipmaps: true, minFilter: THREE.LinearMipmapLinearFilter, ...options } );
+					const camera = new THREE.CubeCamera( 0.1, 10, target );
+
+					return { texture: target.texture, update: ( renderer ) => {
+
+						scale.value = options.type === THREE.HalfFloatType ? 4 : 1;
+						camera.update( renderer, cubeScene );
+
+					}, dispose: () => target.dispose() };
+
+				};
+
+			}
+
+			const half = THREE.HalfFloatType;
+
+			const cases = [
+				...[[ 1920, 1080 ], [ 960, 540 ], [ 1129, 635 ], [ 1477, 831 ], [ 1024, 1024 ], [ 255, 257 ], [ 31, 31 ], [ 333, 1 ], [ 1, 300 ], [ 97, 1000 ]].map( ( [ w, h ] ) => [ `render target rgba8unorm ${ w }×${ h }`, renderTarget( w, h ), 'compute' ] ),
+				...[[ 1920, 1080 ], [ 1129, 635 ], [ 255, 257 ], [ 2048, 2048 ]].map( ( [ w, h ] ) => [ `render target rgba16float ${ w }×${ h }`, renderTarget( w, h, { type: half } ), 'compute' ] ),
+				[ 'render target rgba8unorm 300×200, 4× MSAA', renderTarget( 300, 200, { samples: 4 } ), 'compute' ],
+				[ 'render target rgba8unorm-srgb 300×200 (render fallback)', renderTarget( 300, 200, { colorSpace: THREE.SRGBColorSpace } ), 'render' ],
+				[ 'cube render target rgba16float 96²', cubeTarget( 96, { type: half } ), 'compute' ],
+				[ 'cube render target rgba8unorm 33²', cubeTarget( 33 ), 'compute' ],
+				[ 'data texture rgba8unorm 37×19', dataTexture( { width: 37, height: 19 } ), 'compute' ],
+				[ 'data texture rgba16float 129×65', dataTexture( { width: 129, height: 65, type: half } ), 'compute' ],
+				[ 'data texture rgba32float 129×65', dataTexture( { width: 129, height: 65, type: THREE.FloatType } ), 'compute' ],
+				[ 'data array texture rgba8unorm 40×24×3', dataTexture( { width: 40, height: 24, depth: 3 } ), 'compute' ],
+				[ 'data texture r8unorm 100×60', dataTexture( { width: 100, height: 60, format: THREE.RedFormat } ), 'r8unorm' ],
+				[ 'data texture rgba8unorm-srgb 64×64 (render fallback)', dataTexture( { width: 64, height: 64, colorSpace: THREE.SRGBColorSpace } ), 'render' ]
+			];
+
+			const halfToFloat = ( h ) => THREE.DataUtils.fromHalfFloat( h );
+
+			const layouts = {
+				'rgba8unorm': { channels: 4, bytes: 1, format: THREE.RGBAFormat, type: THREE.UnsignedByteType, array: Uint8Array },
+				'rgba8unorm-srgb': { channels: 4, bytes: 1 },
+				'r8unorm': { channels: 1, bytes: 1, format: THREE.RedFormat, type: THREE.UnsignedByteType, array: Uint8Array },
+				'rgba16float': { channels: 4, bytes: 2, format: THREE.RGBAFormat, type: THREE.HalfFloatType, array: Uint16Array, encode: ( v ) => THREE.DataUtils.toHalfFloat( v ) },
+				'rgba32float': { channels: 4, bytes: 4, format: THREE.RGBAFormat, type: THREE.FloatType, array: Float32Array }
+			};
+
+			async function readLevels( renderer, texture, levelCount = Infinity ) {
+
+				const device = renderer.backend.device;
+				const textureGPU = renderer.backend.get( texture ).texture;
+				const { format } = textureGPU;
+				const { channels, bytes: bytesPerChannel } = layouts[ format ];
+				const levels = [];
+
+				for ( let level = 0; level < Math.min( levelCount, textureGPU.mipLevelCount ); level ++ ) {
+
+					const width = Math.max( 1, textureGPU.width >> level ), height = Math.max( 1, textureGPU.height >> level ), layers = textureGPU.depthOrArrayLayers;
+					const rowBytes = width * channels * bytesPerChannel;
+					const bytesPerRow = Math.ceil( rowBytes / 256 ) * 256;
+					const buffer = device.createBuffer( { size: bytesPerRow * height * layers, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ } );
+					const encoder = device.createCommandEncoder();
+					encoder.copyTextureToBuffer( { texture: textureGPU, mipLevel: level }, { buffer, bytesPerRow, rowsPerImage: height }, [ width, height, layers ] );
+					device.queue.submit( [ encoder.finish() ] );
+					await buffer.mapAsync( GPUMapMode.READ );
+
+					const data = new Uint8Array( buffer.getMappedRange() );
+					const values = new Float64Array( width * height * layers * channels );
+
+					for ( let row = 0; row < height * layers; row ++ ) {
+
+						const slice = data.slice( row * bytesPerRow, row * bytesPerRow + rowBytes );
+						const texels = bytesPerChannel === 1 ? slice : bytesPerChannel === 2 ? Array.from( new Uint16Array( slice.buffer ), halfToFloat ) : new Float32Array( slice.buffer );
+						values.set( texels, row * width * channels );
+
+					}
+
+					buffer.destroy();
+					levels.push( { values, width, height, layers, channels, format } );
+
+				}
+
+				return { levels, format, usage: textureGPU.usage, textureGPU };
+
+			}
+
+			// Render-pass level 1 of a texture holding `level`: the render-pass result from the same input as the compute level after it.
+
+			async function renderPassFrom( level ) {
+
+				const { format, type, array, encode = ( v ) => v } = layouts[ level.format ];
+				const data = new array( level.values.length );
+				for ( let i = 0; i < data.length; i ++ ) data[ i ] = encode( level.values[ i ] );
+
+				const texture = level.layers > 1 ? new THREE.DataArrayTexture( data, level.width, level.height, level.layers ) : new THREE.DataTexture( data, level.width, level.height );
+				texture.format = format;
+				texture.type = type;
+				texture.generateMipmaps = true;
+				texture.minFilter = THREE.LinearMipmapLinearFilter;
+				texture.needsUpdate = true;
+				renderers.render.initTexture( texture );
+
+				const { levels } = await readLevels( renderers.render, texture, 2 );
+				texture.dispose();
+
+				return levels[ 1 ];
+
+			}
+
+			// Differences in 8-bit steps: 8-bit formats in integer units, float formats relative to the content's range (scale).
+			// `input`: the level both were reduced from; differences at exact ties of an even 2×2 average are counted as `ties`.
+
+			function compare( a, b, scale, input = null ) {
+
+				let maxSteps = 0, differing = 0, ties = 0;
+				const unorm8 = layouts[ a.format ].bytes === 1;
+				const even = input !== null && unorm8 && input.width === 2 * a.width && input.height === 2 * a.height;
+
+				for ( let i = 0; i < a.values.length; i ++ ) {
+
+					const steps = Math.abs( a.values[ i ] - b.values[ i ] ) * ( unorm8 ? 1 : 255 / scale );
+					if ( Number.isNaN( steps ) ) return { maxSteps: Infinity, differing: a.values.length, ties };
+					if ( steps > 0 ) differing ++;
+					maxSteps = Math.max( maxSteps, steps );
+
+					if ( even && steps > 0 ) {
+
+						const c = i % a.channels, t = ( i - c ) / a.channels;
+						const x = t % a.width, y = Math.floor( t / a.width ) % a.height, layer = Math.floor( t / ( a.width * a.height ) );
+						const at = ( dx, dy ) => input.values[ ( ( layer * input.height + 2 * y + dy ) * input.width + 2 * x + dx ) * a.channels + c ];
+						if ( ( at( 0, 0 ) + at( 1, 0 ) + at( 0, 1 ) + at( 1, 1 ) ) % 4 === 2 ) ties ++;
+
+					}
+
+				}
+
+				return { maxSteps, differing, ties };
+
+			}
+
+			const results = [];
+
+			for ( const [ name, create, expected ] of cases ) {
+
+				const read = {};
+
+				for ( const [ method, renderer ] of Object.entries( renderers ) ) {
+
+					const { texture, update, dispose } = create();
+					update( renderer );
+					read[ method ] = await readLevels( renderer, texture );
+					read[ method ].compute = renderer.backend.textureUtils._mipmapUtils?.has( read[ method ].textureGPU ) === true;
+					dispose();
+
+				}
+
+				const { render, compute } = read;
+				const scale = compute.format.includes( 'float' ) ? 4 : 1;
+				const sRGB = compute.format.endsWith( '-srgb' );
+				const levels = [];
+
+				for ( let index = 0; index < render.levels.length; index ++ ) {
+
+					const level = compute.levels[ index ];
+
+					levels.push( {
+						level: index,
+						size: `${ level.width }×${ level.height }×${ level.layers }`,
+						chain: compare( level, render.levels[ index ], scale ),
+						step: index === 0 || sRGB ? null : compare( level, await renderPassFrom( compute.levels[ index - 1 ] ), scale, compute.levels[ index - 1 ] )
+					} );
+
+				}
+
+				const path = compute.compute ? 'compute' : 'render';
+				const expectedPath = expected === 'r8unorm' ? ( renderers.compute.backend.device.features.has( 'texture-formats-tier1' ) ? 'compute' : 'render' ) : expected;
+				const later = levels.slice( 1 );
+
+				results.push( {
+					name, format: compute.format, path, expectedPath,
+					storage: ( compute.usage & GPUTextureUsage.STORAGE_BINDING ) !== 0,
+					levelZeroEqual: levels[ 0 ].chain.maxSteps === 0,
+					stepSteps: Math.max( 0, ...later.map( ( level ) => level.step?.maxSteps ?? 0 ) ),
+					chainSteps: Math.max( 0, ...later.map( ( level ) => level.chain.maxSteps ) ),
+					levels
+				} );
+
+			}
+
+			const device = renderers.compute.backend.device;
+
+			window.testResults = {
+				adapter: device.adapterInfo ? `${ device.adapterInfo.vendor } ${ device.adapterInfo.architecture }` : 'unknown',
+				maxStorageTexturesPerShaderStage: device.limits.maxStorageTexturesPerShaderStage,
+				levelsPerDispatch: renderers.compute.backend.textureUtils._mipmapUtils?.levelsPerDispatch,
+				errors,
+				results
+			};
+
+		</script>
+
+	</body>
+</html>

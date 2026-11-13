@@ -66,6 +66,9 @@ class WebGPUBackend extends Backend {
 	 * @property {number} [samples=0] - When `antialias` is `true`, `4` samples are used by default. Set this parameter to any other integer value than 0 to overwrite the default.
 	 * @property {boolean} [forceWebGL=false] - If set to `true`, the renderer uses a WebGL 2 backend no matter if WebGPU is supported or not.
 	 * @property {boolean} [trackTimestamp=false] - Whether to track timestamps with a Timestamp Query API or not.
+	 * @property {string} [mipmapGeneration='render'] - How mipmaps are generated: 'render' (a render pass per level and layer) or 'compute'
+	 * (compute shaders, up to six levels per dispatch, with the same results). With 'compute', eligible textures get `STORAGE_BINDING` usage, and
+	 * `maxStorageTexturesPerShaderStage` is requested up to 6 unless `requiredLimits` sets it. Other textures use render passes.
 	 * @property {string} [powerPreference=undefined] - The power preference.
 	 * @property {Object} [requiredLimits=undefined] - Specifies the limits that are required by the device request. The request will fail if the adapter cannot provide these limits.
 	 * @property {GPUDevice} [device=undefined] - If there is an existing GPU device on app level, it can be passed to the renderer as a parameter.
@@ -241,9 +244,22 @@ class WebGPUBackend extends Backend {
 
 			}
 
+			let requiredLimits = parameters.requiredLimits;
+
+			// Compute mipmaps write a level per storage texture binding: six bindings
+			// write six levels per dispatch (the default limit is four).
+
+			if ( parameters.mipmapGeneration === 'compute' && requiredLimits.maxStorageTexturesPerShaderStage === undefined ) {
+
+				const maxStorageTexturesPerShaderStage = Math.min( 6, adapter.limits.maxStorageTexturesPerShaderStage );
+
+				if ( maxStorageTexturesPerShaderStage > 4 ) requiredLimits = { ...requiredLimits, maxStorageTexturesPerShaderStage };
+
+			}
+
 			const deviceDescriptor = {
 				requiredFeatures: supportedFeatures,
-				requiredLimits: parameters.requiredLimits
+				requiredLimits
 			};
 
 			device = await adapter.requestDevice( deviceDescriptor );

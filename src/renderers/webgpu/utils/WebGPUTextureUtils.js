@@ -4,6 +4,7 @@ import {
 import { ColorManagement } from '../../../math/ColorManagement.js';
 
 import WebGPUTexturePassUtils from './WebGPUTexturePassUtils.js';
+import WebGPUTextureMipmapUtils from './WebGPUTextureMipmapUtils.js';
 import { submit } from './WebGPUUtils.js';
 import GPUBufferDescriptor from '../descriptors/GPUBufferDescriptor.js';
 import GPUCommandEncoderDescriptor from '../descriptors/GPUCommandEncoderDescriptor.js';
@@ -111,6 +112,14 @@ class WebGPUTextureUtils {
 		 * @default null
 		 */
 		this._passUtils = null;
+
+		/**
+		 * A reference to the compute mipmap utils, used with `mipmapGeneration: 'compute'`.
+		 *
+		 * @type {?WebGPUTextureMipmapUtils}
+		 * @default null
+		 */
+		this._mipmapUtils = null;
 
 		/**
 		 * A dictionary for managing default textures. The key
@@ -369,7 +378,7 @@ class WebGPUTextureUtils {
 
 		let usage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC;
 
-		if ( texture.isStorageTexture === true ) {
+		if ( texture.isStorageTexture === true || this._useComputeMipmaps( texture, format, dimension, levels, primarySamples ) ) {
 
 			usage |= GPUTextureUsage.STORAGE_BINDING;
 
@@ -436,6 +445,7 @@ class WebGPUTextureUtils {
 			msaaTextureDescriptorGPU.label = msaaTextureDescriptorGPU.label + '-msaa';
 			msaaTextureDescriptorGPU.sampleCount = samples;
 			msaaTextureDescriptorGPU.mipLevelCount = 1; // See https://www.w3.org/TR/webgpu/#texture-creation
+			msaaTextureDescriptorGPU.usage &= ~ GPUTextureUsage.STORAGE_BINDING; // multisampled textures can't be storage textures
 
 			// when the multisampled data are discarded, try to use a transient attachment if possible
 
@@ -1070,7 +1080,64 @@ class WebGPUTextureUtils {
 	 */
 	_generateMipmaps( textureGPU, encoder = null ) {
 
+		if ( this.backend.parameters.mipmapGeneration === 'compute' ) {
+
+			const mipmapUtils = this._getMipmapUtils();
+
+			if ( mipmapUtils.canGenerateMipmaps( textureGPU ) ) {
+
+				mipmapUtils.generateMipmaps( textureGPU, encoder );
+
+				return;
+
+			}
+
+		}
+
 		this._getPassUtils().generateMipmaps( textureGPU, encoder );
+
+	}
+
+	/**
+	 * Returns the compute mipmap utils singleton.
+	 *
+	 * @private
+	 * @return {WebGPUTextureMipmapUtils} The utils instance.
+	 */
+	_getMipmapUtils() {
+
+		let mipmapUtils = this._mipmapUtils;
+
+		if ( mipmapUtils === null ) {
+
+			this._mipmapUtils = mipmapUtils = new WebGPUTextureMipmapUtils( this.backend.device );
+
+		}
+
+		return mipmapUtils;
+
+	}
+
+	/**
+	 * Returns whether a texture should be created for compute mipmaps (with
+	 * `STORAGE_BINDING` usage): the renderer uses `mipmapGeneration: 'compute'`,
+	 * the texture's mipmaps are generated, and compute mipmaps support it.
+	 * Other textures keep render-pass generation.
+	 *
+	 * @private
+	 * @param {Texture} texture - The texture.
+	 * @param {string} format - The GPU texture format.
+	 * @param {string} dimension - The GPU texture dimension.
+	 * @param {number} levels - The number of mip levels.
+	 * @param {number} samples - The sample count of the texture.
+	 * @return {boolean} Whether the texture uses compute mipmaps.
+	 */
+	_useComputeMipmaps( texture, format, dimension, levels, samples ) {
+
+		return this.backend.parameters.mipmapGeneration === 'compute' &&
+			texture.generateMipmaps === true && texture.mipmaps.length === 0 && levels > 1 && samples === 1 &&
+			dimension === GPUTextureDimension.TwoD && texture.isCompressedTexture !== true && texture.isCompressedArrayTexture !== true &&
+			texture.isDepthTexture !== true && this._getMipmapUtils().isFormatSupported( format );
 
 	}
 
