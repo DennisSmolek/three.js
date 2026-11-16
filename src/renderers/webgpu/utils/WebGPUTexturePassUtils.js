@@ -127,7 +127,7 @@ fn main_cube( Varys: VarysStruct ) -> @location( 0 ) vec4<f32> {
 		 *
 		 * @type {GPUSampler}
 		 */
-		this.mipmapSampler = device.createSampler( { minFilter: GPUFilterMode.Linear } );
+		this.mipmapSampler = device.createSampler( { minFilter: GPUFilterMode.Linear, magFilter: GPUFilterMode.Linear } );
 
 		/**
 		 * The flipY GPU sampler.
